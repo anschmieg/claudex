@@ -1,0 +1,15 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Stable entry point for shell, package or dotfile managers. The full launcher is installed
+# and upgraded independently under ~/.local/share/claudex/launcher.
+# Keep this file identical to dist/.../wrapper/claudex across updates.
+data_root="${CLAUDEX_DATA_HOME:-$HOME/.local/share/claudex}"
+launcher="${CLAUDEX_LAUNCHER_BIN:-$data_root/launcher}"
+if [[ ! -x "$launcher" ]]; then
+  printf 'claudex: implementation missing at %s\n' "$launcher" >&2
+  printf 'claudex: install or repair the Claudex package, then retry.\n' >&2
+  exit 127
+fi
+export CLAUDEX_MANAGED_WRAPPER=1
+exec "$launcher" "$@"

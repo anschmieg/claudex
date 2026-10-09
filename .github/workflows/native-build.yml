@@ -1,0 +1,81 @@
+# Public CI compiles source with pinned upstream dependencies and synthetic data.
+# No real SIWC credentials, inference, release publishing or binary uploads.
+name: Claudex - native source validation
+
+on:
+  workflow_dispatch:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  native-rust:
+    name: ${{ matrix.label }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - label: macOS ARM64
+            runner: macos-15
+            arch: darwin-arm64
+          - label: macOS x86-64
+            runner: macos-15-intel
+            arch: darwin-x86_64
+          - label: Linux ARM64
+            runner: ubuntu-24.04-arm
+            arch: linux-arm64
+          - label: Linux x86-64
+            runner: ubuntu-24.04
+            arch: linux-x86_64
+    env:
+      CLAUDEX_BUILD_JOBS: "2"
+      CLAUDEX_BUILD_WORKDIR: ${{ runner.temp }}/harness-native-build
+    steps:
+      - name: Checkout curated public source
+        uses: actions/checkout@v4
+      - name: Audit exact public source tree (no tokens, DevKit code or releases)
+        shell: bash
+        run: python3 tools/audit-public-source.py
+      - name: Install stable Rust
+        uses: dtolnay/rust-toolchain@stable
+      - name: Build pinned shunt and secure Codex transport
+        shell: bash
+        run: bash tools/build-pinned-runtime.sh
+      - name: Set up Node.js for synthetic SIWC local auth test
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Test independent OS credential adapters without the noncommercial DevKit
+        shell: bash
+        run: node --test source/siwc-helper/keychain-store.test.mjs source/siwc-helper/secret-service-store.test.mjs
+      - name: Verify authenticated proxy locally without inference
+        shell: bash
+        run: python3 tools/test-local-auth.py
+      - name: Native launcher and T3 compatibility (synthetic, no inference)
+        shell: bash
+        run: PYTHONDONTWRITEBYTECODE=1 python3 tools/test-launcher-concurrency.py
+      - name: Fresh-user install and uninstall with synthetic-only SIWC placeholder
+        shell: bash
+        run: |
+          mkdir -p auth
+          printf '#!/usr/bin/env node\nprocess.exit(99);\n' > auth/claudex-siwc.mjs
+          chmod 700 auth/claudex-siwc.mjs
+          PYTHONDONTWRITEBYTECODE=1 python3 tools/test-fresh-install.py
+      - name: Verify target files and no developer path leakage
+        shell: bash
+        run: |
+          test -x "bin/${{ matrix.arch }}/shunt"
+          test -x "bin/${{ matrix.arch }}/claudex-transport"
+          python3 tools/audit-release.py .
+          if [[ "$RUNNER_OS" == macOS ]]; then
+            shasum -a 256 "bin/${{ matrix.arch }}"/*
+          else
+            sha256sum "bin/${{ matrix.arch }}"/*
+          fi
+
+      # No artifact uploads, tags, package publishing or deployments.

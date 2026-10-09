@@ -1,0 +1,41 @@
+# Builds and runtime
+/bin/
+/dist/
+/target/
+/.build-from-source/
+/.build-target-*/
+/.sideport-cargo/
+/artifacts/
+/*.zip
+/*.tar.gz
+*.log
+*.pid
+*.sse
+.DS_Store
+__pycache__/
+*.pyc
+
+# Optional upstream noncommercial DevKit; NOT part of this public repository
+/source/siwc-helper/vendor/
+/source/siwc-helper/node_modules/
+/source/siwc-helper/dist/
+/auth/claudex-siwc.mjs
+
+# Personal credentials and environment
+.env
+.env.*
+!.env.example
+auth.json
+chatgpt-auth.json
+chatgpt-host.json
+*.pem
+*.p12
+*.p8
+*.key
+*.token
+*credentials*.json
+*private*.json
+
+# Locally generated metadata
+SHA256SUMS
+SOURCE_SHA256SUMS

@@ -1,0 +1,1299 @@
+#!/usr/bin/env bash
+set -euo pipefail
+# User-owned credentials and generated settings must not be world-readable.
+umask 077
+
+export PATH="$HOME/.local/bin:/opt/homebrew/bin:/usr/local/bin:$PATH"
+
+APP="claudex"
+VERSION="0.6.0-dev"
+GATEWAY_PORT="${CLAUDEX_PORT:-3147}"
+TRANSPORT_PORT="${CLAUDEX_TRANSPORT_PORT:-3150}"
+BASE_URL="http://127.0.0.1:${GATEWAY_PORT}"
+TRANSPORT_URL="http://127.0.0.1:${TRANSPORT_PORT}"
+
+CFG_ROOT="${CLAUDEX_CONFIG_HOME:-$HOME/.config/claudex}"
+STATE_ROOT="${CLAUDEX_STATE_HOME:-$HOME/.local/state/claudex}"
+SECRETS_ROOT="$STATE_ROOT/private"
+CLIENT_TOKEN_FILE="$SECRETS_ROOT/client-token"
+TRANSPORT_TOKEN_FILE="$SECRETS_ROOT/transport-token"
+DATA_ROOT="${CLAUDEX_DATA_HOME:-$HOME/.local/share/claudex}"
+BIN_ROOT="${CLAUDEX_BIN_HOME:-$HOME/.local/bin}"
+AGENTS_DIR="$HOME/.claude/agents"
+
+SHUNT_BIN="${CLAUDEX_SHUNT_BIN:-$DATA_ROOT/shunt}"
+TRANSPORT_BIN="${CLAUDEX_TRANSPORT_BIN:-$DATA_ROOT/claudex-transport}"
+SIWC_HELPER="${CLAUDEX_SIWC_HELPER:-$DATA_ROOT/claudex-siwc.mjs}"
+SIWC_MARKER="$CFG_ROOT/native-siwc-enabled"
+SHUNT_CFG="$CFG_ROOT/shunt.toml"
+SHUNT_PATCH="$DATA_ROOT/patches/claudex-shunt.patch"
+TRANSPORT_SRC_DIR="$DATA_ROOT/transport-source"
+
+CLAUDE_SETTINGS_SOL="$CFG_ROOT/claude-settings-sol.json"
+CLAUDE_SETTINGS_ASTRA="$CFG_ROOT/claude-settings-astra.json"
+CLAUDE_SETTINGS_LUNA="$CFG_ROOT/claude-settings-luna.json"
+
+SHUNT_PID="$STATE_ROOT/shunt.pid"
+TRANSPORT_PID="$STATE_ROOT/transport.pid"
+SHUNT_LOG="$STATE_ROOT/shunt.log"
+TRANSPORT_LOG="$STATE_ROOT/transport.log"
+RUNTIME_LOCK="$STATE_ROOT/.runtime-lock"
+SESSION_DIR="$STATE_ROOT/sessions"
+RUNTIME_EPHEMERAL="$STATE_ROOT/ephemeral-runtime"
+RUNTIME_PERSISTENT="$STATE_ROOT/persistent-runtime"
+LAUNCH_LEASE=""
+
+UPDATE_TRANSACTION=0
+UPDATE_ROLLBACK_DIR=""
+
+die() { printf 'claudex: %s\n' "$*" >&2; exit 1; }
+note() { printf '%s\n' "$*" >&2; }
+have() { command -v "$1" >/dev/null 2>&1; }
+
+usage() {
+  cat <<'EOF'
+claudex - GPT models inside the Claude Code harness
+
+Usage:
+  claudex [sol|astra|luna] [-- <claude args...>]
+  claudex fast [sol|astra|luna] [-- <claude args...>]
+  claudex setup
+  claudex version               # Claudex package version
+  claudex --version            # underlying Claude Code version for SDK clients
+  claudex login
+  claudex auth-status
+  claudex logout
+  claudex update
+  claudex doctor
+  claudex smoke
+  claudex smoke-claude
+  claudex start
+  claudex restart
+  claudex stop
+  claudex uninstall
+
+Models:
+  sol    GPT-6.1 Sol (default)
+  astra  GPT-6 Astra
+  luna   GPT-6 Luna
+
+Architecture:
+  Claude Code -> patched shunt translator -> local Codex-native transport
+  -> native SIWC public Responses API (Codex AuthManager fallback).
+EOF
+}
+
+ensure_dirs() {
+  mkdir -p "$CFG_ROOT" "$STATE_ROOT" "$DATA_ROOT/patches" "$DATA_ROOT/transport-source" "$AGENTS_DIR" "$BIN_ROOT"
+}
+
+# Directory lock works on default macOS Bash 3.2 and Linux without flock.
+# SIGKILL may require manual inspection/removal of the stale lock.
+# Commands execute in a subshell so EXIT releases the lock on failure.
+with_runtime_lock() (
+  ensure_dirs
+  local attempt
+  for attempt in $(seq 1 200); do
+    if mkdir "$RUNTIME_LOCK" 2>/dev/null; then
+      trap 'rmdir "$RUNTIME_LOCK" 2>/dev/null || true' EXIT
+      "$@"
+      local result=$?
+      # Bash 3.2 can suppress a nested EXIT trap when invoked from another
+      # EXIT trap. Release explicitly on the normal path as well.
+      rmdir "$RUNTIME_LOCK" || die "Claudex runtime lock unexpectedly contains files"
+      trap - EXIT
+      exit "$result"
+    fi
+    sleep 0.05
+  done
+  die "Runtime lifecycle lock is busy or stale: $RUNTIME_LOCK. Verify no Claudex process is modifying state before manually clearing it."
+)
+
+# Call only while holding RUNTIME_LOCK. Drop leases for launchers that exited
+# without cleanup; never infer ownership from arbitrary PID files.
+active_session_leases() {
+  local lease pid active=1
+  for lease in "$SESSION_DIR"/*; do
+    [[ -f "$lease" && ! -L "$lease" ]] || continue
+    pid="$(cat "$lease" 2>/dev/null || true)"
+    if [[ "$pid" =~ ^[0-9]+$ ]] && pid_exists "$pid"; then
+      active=0
+    else
+      rm -f -- "$lease"
+    fi
+  done
+  return "$active"
+}
+
+assert_no_active_sessions() {
+  if active_session_leases; then
+    die "Claudex has active interactive sessions; close them before stop/restart/update/uninstall."
+  fi
+}
+
+# Two independent per-runtime secrets: Claude Code -> shunt, then shunt ->
+# Codex transport. Secrets exist only in an owner-only private state folder.
+# Only pre-approved, session-aware clients should receive the bearer token.
+random_local_token() {
+  have od || die "od is required for cross-platform secure token generation"
+  local value
+  value="$(od -An -N32 -tx1 /dev/urandom | tr -d ' \n')"
+  [[ "$value" =~ ^[0-9a-f]{64}$ ]] || die "OS random token generation failed"
+  printf '%s' "$value"
+}
+
+valid_local_token_file() {
+  local value
+  [[ -f "$1" && ! -L "$1" ]] || return 1
+  value="$(cat "$1")"
+  [[ "$value" =~ ^[0-9a-f]{64}$ ]]
+}
+
+ensure_runtime_tokens() (
+  umask 077
+  ensure_dirs
+  [[ ! -L "$SECRETS_ROOT" ]] || die "Refusing symlinked Claudex secrets directory"
+  mkdir -p "$SECRETS_ROOT"
+  chmod 700 "$SECRETS_ROOT"
+  local lock="$SECRETS_ROOT/.token-lock" i got_lock=0 file tmp
+  for i in $(seq 1 100); do
+    if mkdir "$lock" 2>/dev/null; then got_lock=1; break; fi
+    sleep 0.05
+  done
+  [[ "$got_lock" == 1 ]] || die "Claudex token-generation lock is busy (remove stale lock only when runtime is stopped)"
+  trap 'rmdir "$lock" 2>/dev/null || true' EXIT
+
+  if valid_local_token_file "$CLIENT_TOKEN_FILE" && valid_local_token_file "$TRANSPORT_TOKEN_FILE"; then
+    chmod 600 "$CLIENT_TOKEN_FILE" "$TRANSPORT_TOKEN_FILE"
+    return 0
+  fi
+  if pid_running "$SHUNT_PID" || pid_running "$TRANSPORT_PID"; then
+    die "Active Claudex runtime has missing or invalid tokens; stop it before rotating local credentials"
+  fi
+  for file in "$CLIENT_TOKEN_FILE" "$TRANSPORT_TOKEN_FILE"; do
+    [[ ! -L "$file" ]] || die "Refusing symlinked Claudex session token"
+    tmp="$(mktemp "$SECRETS_ROOT/.newtoken.XXXXXXXX")" || die "Cannot create private token"
+    random_local_token > "$tmp"
+    chmod 600 "$tmp"
+    mv -f "$tmp" "$file"
+  done
+)
+
+client_token() {
+  ensure_runtime_tokens
+  cat "$CLIENT_TOKEN_FILE"
+}
+
+transport_token() {
+  ensure_runtime_tokens
+  cat "$TRANSPORT_TOKEN_FILE"
+}
+
+codex_logged_in() {
+  have codex && codex login status >/dev/null 2>&1
+}
+
+native_chatgpt_enabled() {
+  [[ -f "$SIWC_MARKER" ]] && { [[ "$(uname -s)" == Darwin ]] || [[ "$(uname -s)" == Linux ]]; }
+}
+
+native_chatgpt_logged_in() {
+  have node || return 1
+  [[ -f "$SIWC_HELPER" ]] || return 1
+  node "$SIWC_HELPER" token >/dev/null 2>&1
+}
+
+login_chatgpt() {
+  case "$(uname -s)" in
+    Darwin) ;;
+    Linux) have secret-tool || die "Native Linux SIWC needs secret-tool (libsecret-tools) and an unlocked Secret Service keyring. No plaintext fallback is provided." ;;
+    *) die "Native Sign in with ChatGPT supports macOS and Linux only." ;;
+  esac
+  have node || die "Node.js 22+ is required for native Sign in with ChatGPT"
+  [[ -f "$SIWC_HELPER" ]] || die "missing native ChatGPT helper: $SIWC_HELPER"
+  note "Opening Continue with ChatGPT in your browser..."
+  node "$SIWC_HELPER" login
+  native_chatgpt_logged_in || die "ChatGPT sign-in completed without plan-usage permission"
+  ensure_dirs
+  : > "$SIWC_MARKER"
+  write_shunt_config
+  if gateway_ready || transport_ready; then
+    note "Native ChatGPT plan connection is ready. A persistent Claudex daemon is already running; use 'claudex restart' only if you want that daemon to switch auth immediately."
+  else
+    note "Native ChatGPT plan connection is ready. The next Claudex session will use it."
+  fi
+}
+
+auth_status() {
+  if native_chatgpt_logged_in; then
+    note "Auth mode: native Sign in with ChatGPT (preferred)"
+    node "$SIWC_HELPER" status
+  elif native_chatgpt_enabled; then
+    note "Native Sign in with ChatGPT profile is configured, but this process cannot access its credentials (often a macOS Keychain permission issue)."
+    if codex_logged_in; then
+      note "Legacy Codex fallback is available in this process. To require SIWC only, use CLAUDEX_AUTH_MODE=siwc."
+      codex login status
+    else
+      return 1
+    fi
+  elif codex_logged_in; then
+    note "Auth mode: legacy Codex login fallback"
+    codex login status
+  else
+    note "Auth mode: disconnected"
+    return 1
+  fi
+}
+
+logout_chatgpt() {
+  assert_no_active_sessions
+  # Signing out must revoke the local plan-backed endpoints immediately, not
+  # just the stored OAuth profile: a running transport caches access tokens.
+  stop_runtime || die "Claudex logout aborted: the existing runtime could not be safely stopped"
+  rm -f -- "$RUNTIME_EPHEMERAL" "$RUNTIME_PERSISTENT"
+  if [[ -f "$SIWC_HELPER" ]] && have node; then node "$SIWC_HELPER" logout; fi
+  rm -f -- "$SIWC_MARKER"
+  # Do not call write_shunt_config here: it generates fresh local bearer
+  # tokens even when the user requested all authentication to stop.
+  note "Native ChatGPT profile logged out and local Claudex services stopped; registration retained for reauthorization."
+}
+
+ensure_claude() {
+  have claude && return 0
+  if have brew; then
+    note "Installing Claude Code with Homebrew..."
+    brew install --cask claude-code
+  else
+    have curl || die "curl is required to install Claude Code"
+    note "Installing Claude Code with Anthropic's installer..."
+    curl -fsSL https://claude.ai/install.sh | bash
+  fi
+  hash -r
+  have claude || die "Claude Code installation failed"
+}
+
+update_claude() {
+  if have brew && brew list --cask claude-code >/dev/null 2>&1; then
+    note "Updating Claude Code with Homebrew..."
+    brew upgrade --cask claude-code || true
+  elif have claude; then
+    note "Updating Claude Code with its native updater..."
+    claude update || true
+  else
+    ensure_claude
+  fi
+}
+
+check_prereqs() {
+  have claude || die "Claude Code is missing; run: claudex setup"
+  if native_chatgpt_enabled; then
+    have node || die "Node.js 22+ is required for native Sign in with ChatGPT"
+  else
+    have codex || die "No native ChatGPT profile; run 'claudex login' (or install Codex for fallback)"
+    codex_logged_in || die "No ChatGPT auth is ready; run: claudex login"
+  fi
+}
+
+write_shunt_config() {
+  ensure_runtime_tokens
+  [[ ! -L "$SHUNT_CFG" ]] || die "Refusing symlinked shunt config"
+  touch "$SHUNT_CFG"
+  chmod 600 "$SHUNT_CFG"
+  local native_tool_search=true
+  if native_chatgpt_enabled; then
+    native_tool_search=false
+  fi
+  cat > "$SHUNT_CFG" <<EOF
+[server]
+bind = "127.0.0.1:${GATEWAY_PORT}"
+default_provider = "claudex-codex"
+
+[server.auth]
+tokens_env = "SHUNT_CLIENT_TOKENS"
+
+[providers.claudex-codex]
+kind = "responses"
+base_url = "http://127.0.0.1:${TRANSPORT_PORT}/v1"
+auth = "api_key"
+api_key_env = "CLAUDEX_TRANSPORT_TOKEN"
+tool_search = ${native_tool_search}
+request_compression = false
+websocket = false
+count_tokens = "tiktoken"
+
+[[routes]]
+model = "gpt-6.1-sol[1m]"
+provider = "claudex-codex"
+upstream_model = "gpt-6.1-sol"
+
+[[routes]]
+model = "gpt-6-astra[1m]"
+provider = "claudex-codex"
+upstream_model = "gpt-6-astra"
+
+[[routes]]
+model = "gpt-6-luna[1m]"
+provider = "claudex-codex"
+upstream_model = "gpt-6-luna"
+
+[[routes]]
+model = "gpt-6.1-sol"
+provider = "claudex-codex"
+upstream_model = "gpt-6.1-sol"
+
+[[routes]]
+model = "gpt-6-astra"
+provider = "claudex-codex"
+upstream_model = "gpt-6-astra"
+
+[[routes]]
+model = "gpt-6-luna"
+provider = "claudex-codex"
+upstream_model = "gpt-6-luna"
+EOF
+}
+
+write_one_claude_settings() {
+  local file="$1" selected_model="$2" local_client_token
+  local_client_token="$(client_token)"
+  [[ ! -L "$file" ]] || die "Refusing symlinked Claude settings"
+  touch "$file"
+  chmod 600 "$file"
+  cat > "$file" <<EOF
+{
+  "model": "$selected_model",
+  "effortLevel": "medium",
+  "modelPicker": {
+    "replaceBuiltInOptions": true,
+    "options": [
+      {
+        "model": "gpt-6.1-sol[1m]",
+        "label": "GPT-6.1 Sol",
+        "description": "Default: strong coding, orchestration, exploration and implementation",
+        "behavesAs": "claude-sonnet-5"
+      },
+      {
+        "model": "gpt-6-astra[1m]",
+        "label": "GPT-6 Astra",
+        "description": "Escalation: hardest reasoning, architecture and adversarial review",
+        "behavesAs": "claude-opus-5"
+      },
+      {
+        "model": "gpt-6-luna[1m]",
+        "label": "GPT-6 Luna",
+        "description": "Fast/cheap: bounded exploration and straightforward implementation",
+        "behavesAs": "claude-sonnet-5"
+      }
+    ]
+  },
+  "env": {
+    "ANTHROPIC_BASE_URL": "$BASE_URL",
+    "ANTHROPIC_AUTH_TOKEN": "$local_client_token",
+    "ANTHROPIC_DEFAULT_SONNET_MODEL": "gpt-6.1-sol[1m]",
+    "ANTHROPIC_DEFAULT_OPUS_MODEL": "gpt-6-astra[1m]",
+    "ANTHROPIC_DEFAULT_HAIKU_MODEL": "gpt-6-luna[1m]",
+    "ANTHROPIC_SMALL_FAST_MODEL": "gpt-6-luna[1m]",
+    "ENABLE_TOOL_SEARCH": "true",
+    "CLAUDE_CODE_GATEWAY_HINT_HEADERS": "1",
+    "CLAUDE_CODE_AUTO_COMPACT_WINDOW": "272000",
+    "CLAUDE_CODE_ENABLE_FINE_GRAINED_TOOL_STREAMING": "1"
+  }
+}
+EOF
+}
+
+write_claude_settings() {
+  write_one_claude_settings "$CLAUDE_SETTINGS_SOL" "gpt-6.1-sol[1m]"
+  write_one_claude_settings "$CLAUDE_SETTINGS_ASTRA" "gpt-6-astra[1m]"
+  write_one_claude_settings "$CLAUDE_SETTINGS_LUNA" "gpt-6-luna[1m]"
+}
+
+write_agents() {
+  ensure_dirs
+  # Generate into app-controlled staging first; never blindly overwrite
+  # existing native Claude Code agent files in the user's home directory.
+  local user_agents_dir="$AGENTS_DIR"
+  local agent_staging="$DATA_ROOT/agents-staging"
+  local agent_ownership="$DATA_ROOT/agents-owned"
+  mkdir -p "$agent_staging" "$agent_ownership"
+  local AGENTS_DIR="$agent_staging"
+  cat > "$AGENTS_DIR/gpt-fast.md" <<'EOF'
+---
+name: gpt-fast
+description: Fast inexpensive worker for bounded exploration OR straightforward implementation. Use for locating code, collecting evidence, mechanical edits, small fixes, simple tests, and other tasks where speed matters more than deep reasoning.
+model: gpt-6-luna[1m]
+effort: medium
+---
+Work autonomously inside Claude Code. You may explore or implement: choose the shortest path that completes the delegated task. Keep scope bounded, verify concrete changes, and escalate if the task turns out to require deeper reasoning.
+EOF
+  cat > "$AGENTS_DIR/gpt-fast-deep.md" <<'EOF'
+---
+name: gpt-fast-deep
+description: Luna with high reasoning for cost-sensitive work that is still bounded but not purely mechanical. Suitable for focused debugging, moderately tricky exploration, or implementation with clear scope.
+model: gpt-6-luna[1m]
+effort: high
+---
+Use the extra reasoning budget to solve the bounded task carefully. Exploration and implementation are both allowed. Verify assumptions with tools and return concise evidence.
+EOF
+  cat > "$AGENTS_DIR/gpt-core.md" <<'EOF'
+---
+name: gpt-core
+description: Default Sol worker for either exploration or implementation when the task benefits from stronger reasoning, broader repository understanding, or multi-step execution.
+model: gpt-6.1-sol[1m]
+effort: medium
+---
+Handle the task end-to-end. Investigate enough to understand the surrounding code, then implement or report findings as appropriate. Run focused verification and keep the result concise.
+EOF
+  cat > "$AGENTS_DIR/gpt-core-deep.md" <<'EOF'
+---
+name: gpt-core-deep
+description: Sol with high reasoning for difficult debugging, deep repository investigation, correctness review, and demanding implementation before escalating to Astra.
+model: gpt-6.1-sol[1m]
+effort: high
+---
+Treat this as a difficult engineering task. Challenge assumptions, trace behavior across relevant modules, verify findings, and complete the requested work rather than stopping at diagnosis.
+EOF
+  cat > "$AGENTS_DIR/gpt-expert.md" <<'EOF'
+---
+name: gpt-expert
+description: Astra specialist for the hardest architecture, root-cause, adversarial review, and unresolved reasoning tasks. Use selectively because it is slower and more token-hungry than Sol.
+model: gpt-6-astra[1m]
+effort: medium
+---
+Focus on the hard part that justified escalation. Investigate deeply, identify the highest-leverage answer or change, verify it, and avoid expanding scope unnecessarily.
+EOF
+  local generated agent destination reference
+  for generated in "$agent_staging"/gpt-*.md; do
+    [[ -f "$generated" ]] || continue
+    agent="$(basename "$generated")"
+    destination="$user_agents_dir/$agent"
+    reference="$agent_ownership/$agent"
+    if [[ -L "$destination" ]] || { [[ -e "$destination" ]] &&
+         { [[ ! -f "$reference" ]] || ! cmp -s "$destination" "$reference"; }; }; then
+      note "Preserving existing or edited Claude Code agent: $destination"
+      continue
+    fi
+    install -m 0644 "$generated" "$destination"
+    install -m 0600 "$generated" "$reference"
+  done
+}
+
+pid_exists() {
+  local pid="$1"
+  kill -0 "$pid" 2>/dev/null || { have lsof && lsof -p "$pid" >/dev/null 2>&1; }
+}
+
+pid_running() {
+  local file="$1" pid
+  [[ -f "$file" ]] || return 1
+  pid="$(cat "$file" 2>/dev/null || true)"
+  [[ "$pid" =~ ^[0-9]+$ ]] && pid_exists "$pid"
+}
+
+file_inode() {
+  local path="$1"
+  case "$(uname -s)" in
+    Darwin) stat -f '%i' "$path" 2>/dev/null ;;
+    Linux) stat -Lc '%i' "$path" 2>/dev/null ;;
+    *) return 1 ;;
+  esac
+}
+
+mapped_executable_inode() {
+  local pid="$1" path="$2" canonical
+  case "$(uname -s)" in
+    Darwin)
+      have lsof || return 1
+      # macOS temp folders often use /var -> /private/var. lsof can return
+      # the canonical path while our validated executable path uses /var.
+      # Match either spelling, but still require the SAME mapped file inode.
+      canonical="$(cd -P -- "$(dirname -- "$path")" 2>/dev/null && printf '%s/%s' "$PWD" "$(basename -- "$path")")" || return 1
+      lsof -a -p "$pid" -d txt -Ffin 2>/dev/null | awk -v target="$path" -v resolved="$canonical" '''
+        /^i/ { inode=substr($0,2); next }
+        /^n/ { name=substr($0,2); if ((name==target || name==resolved) && inode!="") { print inode; exit } }
+      '''
+      ;;
+    Linux)
+      [[ -e "/proc/$pid/exe" ]] || return 1
+      stat -Lc '%i' "/proc/$pid/exe" 2>/dev/null
+      ;;
+    *) return 1 ;;
+  esac
+}
+
+runtime_image_status() {
+  local file="$1" binary="$2" pid current mapped
+  [[ -x "$binary" ]] || { echo MISSING; return 0; }
+  [[ -f "$file" ]] || { echo UNMANAGED; return 0; }
+  pid="$(cat "$file" 2>/dev/null || true)"
+  [[ "$pid" =~ ^[0-9]+$ ]] || { echo UNMANAGED; return 0; }
+  pid_exists "$pid" || { echo UNMANAGED; return 0; }
+  current="$(file_inode "$binary" 2>/dev/null || true)"
+  mapped="$(mapped_executable_inode "$pid" "$binary" 2>/dev/null || true)"
+  if [[ -z "$current" || -z "$mapped" ]]; then
+    echo UNKNOWN
+  elif [[ "$current" == "$mapped" ]]; then
+    echo CURRENT
+  else
+    echo STALE
+  fi
+}
+
+assert_ready_runtime_current() {
+  local label="$1" ready_fn="$2" pid_file="$3" binary="$4" status
+  "$ready_fn" || return 1
+  status="$(runtime_image_status "$pid_file" "$binary")"
+  case "$status" in
+    CURRENT) return 0 ;;
+    STALE) die "$label is ready but running an older executable image; run 'claudex stop' and then retry" ;;
+    UNMANAGED) die "$label is ready but is not owned by the live Claudex PID file; stop the process occupying the Claudex port, then retry" ;;
+    MISSING) die "$label is ready but the installed runtime binary is missing: $binary" ;;
+    *) die "$label is ready but its executable image could not be verified; refusing to assume the runtime is current" ;;
+  esac
+}
+
+transport_ready() {
+  have curl && curl -fsS --max-time 2 "$TRANSPORT_URL/readyz" >/dev/null 2>&1
+}
+
+gateway_ready() {
+  local token
+  [[ -f "$CLIENT_TOKEN_FILE" ]] || return 1
+  token="$(cat "$CLIENT_TOKEN_FILE")"
+  have curl && curl -fsS --max-time 2 -H "Authorization: Bearer $token" "$BASE_URL/v1/models" >/dev/null 2>&1
+}
+
+start_transport() {
+  ensure_runtime_tokens
+  if transport_ready; then
+    assert_ready_runtime_current "Codex-native transport" transport_ready "$TRANSPORT_PID" "$TRANSPORT_BIN"
+    return 0
+  fi
+  [[ -x "$TRANSPORT_BIN" ]] || die "missing transport binary: $TRANSPORT_BIN"
+  if pid_running "$TRANSPORT_PID"; then
+    if [[ "$(runtime_image_status "$TRANSPORT_PID" "$TRANSPORT_BIN")" == STALE ]]; then
+      die "Codex-native transport PID $(cat "$TRANSPORT_PID") is running an older executable image; stop it before starting the installed runtime"
+    fi
+    sleep 0.2
+    if transport_ready; then
+      assert_ready_runtime_current "Codex-native transport" transport_ready "$TRANSPORT_PID" "$TRANSPORT_BIN"
+      return 0
+    fi
+    die "Codex-native transport PID $(cat "$TRANSPORT_PID") is running but not ready at $TRANSPORT_URL"
+  fi
+  : > "$TRANSPORT_LOG"
+  CLAUDEX_TRANSPORT_TOKEN="$(transport_token)" CLAUDEX_SIWC_HELPER="$SIWC_HELPER" CLAUDEX_AUTH_MODE="${CLAUDEX_AUTH_MODE:-auto}" nohup "$TRANSPORT_BIN" --listen "127.0.0.1:${TRANSPORT_PORT}" >>"$TRANSPORT_LOG" 2>&1 &
+  local transport_pid=$!
+  echo "$transport_pid" > "$TRANSPORT_PID"
+  disown "$transport_pid" 2>/dev/null || true
+  local i
+  for i in $(seq 1 100); do
+    transport_ready && return 0
+    sleep 0.02
+  done
+  tail -n 60 "$TRANSPORT_LOG" >&2 || true
+  die "Codex-native transport did not become ready at $TRANSPORT_URL"
+}
+
+start_gateway() {
+  start_transport
+  if gateway_ready; then
+    assert_ready_runtime_current "Claudex translator" gateway_ready "$SHUNT_PID" "$SHUNT_BIN"
+    return 0
+  fi
+  [[ -x "$SHUNT_BIN" ]] || die "missing shunt binary: $SHUNT_BIN"
+  [[ -f "$SHUNT_CFG" ]] || write_shunt_config
+  if pid_running "$SHUNT_PID"; then
+    if [[ "$(runtime_image_status "$SHUNT_PID" "$SHUNT_BIN")" == STALE ]]; then
+      die "Claudex translator PID $(cat "$SHUNT_PID") is running an older executable image; stop it before starting the installed runtime"
+    fi
+    sleep 0.2
+    if gateway_ready; then
+      assert_ready_runtime_current "Claudex translator" gateway_ready "$SHUNT_PID" "$SHUNT_BIN"
+      return 0
+    fi
+    die "Claudex translator PID $(cat "$SHUNT_PID") is running but not ready at $BASE_URL"
+  fi
+  : > "$SHUNT_LOG"
+  SHUNT_CLIENT_TOKENS="claudex:$(client_token)" CLAUDEX_TRANSPORT_TOKEN="$(transport_token)" nohup "$SHUNT_BIN" --config "$SHUNT_CFG" run >>"$SHUNT_LOG" 2>&1 &
+  local shunt_pid=$!
+  echo "$shunt_pid" > "$SHUNT_PID"
+  disown "$shunt_pid" 2>/dev/null || true
+  local i
+  for i in $(seq 1 100); do
+    gateway_ready && return 0
+    sleep 0.02
+  done
+  tail -n 60 "$SHUNT_LOG" >&2 || true
+  die "translator did not become ready at $BASE_URL"
+}
+
+stop_one() {
+  local file="$1" label="$2" binary="$3" quiet="${4:-0}" pid i image_status
+  [[ -f "$file" ]] || return 0
+  pid="$(cat "$file" 2>/dev/null || true)"
+  if [[ ! "$pid" =~ ^[0-9]+$ ]] || ! pid_exists "$pid"; then
+    rm -f "$file"
+    return 0
+  fi
+  # PID files are not authority to kill an arbitrary reused or substituted
+  # process. Require the mapped executable image to match Claudex's binary.
+  image_status="$(runtime_image_status "$file" "$binary")"
+  if [[ "$image_status" != CURRENT ]]; then
+    note "Refusing to stop $label (PID $pid): executable image is $image_status, not verified as current Claudex."
+    return 1
+  fi
+  if ! kill "$pid" 2>/dev/null; then
+    note "Could not stop $label (PID $pid); leaving PID file intact."
+    return 1
+  fi
+  for i in $(seq 1 40); do
+    kill -0 "$pid" 2>/dev/null || break
+    sleep 0.05
+  done
+  if pid_exists "$pid"; then
+    note "$label (PID $pid) did not stop; leaving PID file intact."
+    return 1
+  fi
+  # Reap session-owned child processes so Bash does not print an asynchronous
+  # "Terminated: 15" job notification after an otherwise silent cleanup.
+  wait "$pid" 2>/dev/null || true
+  rm -f "$file"
+  [[ "$quiet" -eq 1 ]] || note "Stopped $label."
+}
+
+stop_runtime() {
+  local quiet="${1:-0}" failed=0
+  stop_one "$SHUNT_PID" "Claudex translator" "$SHUNT_BIN" "$quiet" || failed=1
+  stop_one "$TRANSPORT_PID" "Claudex Codex transport" "$TRANSPORT_BIN" "$quiet" || failed=1
+  # Missing PID files are NOT evidence of shutdown. An untracked but live
+  # process can still hold a valid bearer token in memory after file deletion.
+  # Fail closed and retain credentials until the listener is safely stopped.
+  if gateway_ready || transport_ready; then
+    note "Claudex localhost gateway or transport is still reachable after shutdown; refusing to claim token revocation."
+    failed=1
+  fi
+  if [[ "$failed" -eq 0 ]] && ! pid_running "$SHUNT_PID" && ! pid_running "$TRANSPORT_PID"; then
+    rm -f -- "$CLIENT_TOKEN_FILE" "$TRANSPORT_TOKEN_FILE"
+  fi
+  return "$failed"
+}
+
+restart_runtime() {
+  assert_no_active_sessions
+  check_prereqs
+  runtime_present || setup_all
+  stop_runtime || die "Claudex restart aborted because the existing runtime could not be stopped"
+  write_shunt_config
+  write_claude_settings
+  start_gateway
+  : > "$RUNTIME_PERSISTENT"
+  rm -f -- "$RUNTIME_EPHEMERAL"
+  doctor
+}
+
+runtime_present() {
+  [[ -x "$SHUNT_BIN" && -x "$TRANSPORT_BIN" ]]
+}
+
+verify_transport_candidate() {
+  local candidate="$1" tmp="$2" candidate_log candidate_pid candidate_port candidate_body model failed
+  candidate_log="$tmp/transport-candidate-smoke.log"
+  : > "$candidate_log"
+  CLAUDEX_TRANSPORT_TOKEN="$(transport_token)" CLAUDEX_SIWC_HELPER="$SIWC_HELPER" CLAUDEX_AUTH_MODE="${CLAUDEX_AUTH_MODE:-auto}" "$candidate" --listen 127.0.0.1:0 >>"$candidate_log" 2>&1 &
+  candidate_pid=$!
+  candidate_port=""
+  for _ in $(seq 1 100); do
+    candidate_port="$(sed -n 's/.*127\.0\.0\.1:\([0-9][0-9]*\).*/\1/p' "$candidate_log" | tail -n 1)"
+    [[ -n "$candidate_port" ]] && break
+    pid_exists "$candidate_pid" || break
+    sleep 0.1
+  done
+
+  failed=0
+  if [[ -z "$candidate_port" ]]; then
+    failed=1
+    note "Candidate Codex transport did not become ready."
+  else
+    local attempt attempts=1 models="gpt-6-luna"
+    # A single Luna request bounds quota cost for explicit experimental
+    # updates; Sol/Astra and repeated runs require a second explicit opt-in.
+    if [[ "$(printenv CLAUDEX_EXTENDED_LIVE_VERIFY 2>/dev/null || true)" == 1 ]]; then
+      models="gpt-6-luna gpt-6.1-sol gpt-6-astra"
+      attempts=3
+    fi
+    for model in $models; do
+      for attempt in $(seq 1 "$attempts"); do
+        candidate_body="$tmp/candidate-${model}-${attempt}.sse"
+        if ! curl -fsS -N --max-time 90 \
+          -H "content-type: application/json" \
+          -H "accept: text/event-stream" \
+          -H "Authorization: Bearer $(transport_token)" \
+          --data-binary "{\"model\":\"${model}\",\"input\":[{\"role\":\"user\",\"content\":[{\"type\":\"input_text\",\"text\":\"Reply exactly OK\"}]}],\"stream\":true,\"store\":false,\"reasoning\":{\"effort\":\"medium\",\"summary\":\"auto\"},\"text\":{\"verbosity\":\"medium\"}}" \
+          "http://127.0.0.1:${candidate_port}/v1/responses" > "$candidate_body"; then
+          failed=1
+          note "Candidate transport request failed for $model (attempt $attempt/$attempts)."
+          break 2
+        fi
+        if grep -q '"type":"error"' "$candidate_body" \
+          || grep -q '"type":"response.failed"' "$candidate_body" \
+          || grep -q 'not supported when using Codex with a ChatGPT account' "$candidate_body" \
+          || ! grep -q '"type":"response.completed"' "$candidate_body" \
+          || ! grep -q '"text":"OK"' "$candidate_body"; then
+          failed=1
+          note "Candidate transport is incompatible with required model $model (attempt $attempt/$attempts)."
+          tail -n 40 "$candidate_body" >&2 || true
+          break 2
+        fi
+      done
+      note "Candidate model smoke passed $attempts/$attempts: $model"
+    done
+  fi
+
+  kill "$candidate_pid" 2>/dev/null || true
+  wait "$candidate_pid" 2>/dev/null || true
+  if [[ "$failed" -ne 0 ]]; then
+    tail -n 60 "$candidate_log" >&2 || true
+    return 1
+  fi
+}
+
+prepare_runtime_rollback() {
+  [[ "$UPDATE_TRANSACTION" -eq 1 ]] || return 0
+  [[ -z "$UPDATE_ROLLBACK_DIR" ]] || return 0
+  ensure_dirs
+  UPDATE_ROLLBACK_DIR="$(mktemp -d "$STATE_ROOT/update-rollback.XXXXXX")"
+  if [[ -x "$SHUNT_BIN" ]]; then
+    install -m 0755 "$SHUNT_BIN" "$UPDATE_ROLLBACK_DIR/shunt"
+    : > "$UPDATE_ROLLBACK_DIR/had-shunt"
+  fi
+  if [[ -x "$TRANSPORT_BIN" ]]; then
+    install -m 0755 "$TRANSPORT_BIN" "$UPDATE_ROLLBACK_DIR/claudex-transport"
+    : > "$UPDATE_ROLLBACK_DIR/had-transport"
+  fi
+  if [[ -f "$STATE_ROOT/shunt-version" ]]; then
+    cp "$STATE_ROOT/shunt-version" "$UPDATE_ROLLBACK_DIR/shunt-version"
+    : > "$UPDATE_ROLLBACK_DIR/had-shunt-version"
+  fi
+  if [[ -f "$STATE_ROOT/codex-transport-version" ]]; then
+    cp "$STATE_ROOT/codex-transport-version" "$UPDATE_ROLLBACK_DIR/codex-transport-version"
+    : > "$UPDATE_ROLLBACK_DIR/had-codex-version"
+  fi
+}
+
+restore_runtime_rollback() {
+  local dir="$UPDATE_ROLLBACK_DIR"
+  [[ -n "$dir" && -d "$dir" ]] || return 1
+  if [[ -f "$dir/had-shunt" ]]; then
+    install -m 0755 "$dir/shunt" "$SHUNT_BIN.new"
+    mv "$SHUNT_BIN.new" "$SHUNT_BIN"
+  else
+    rm -f "$SHUNT_BIN"
+  fi
+  if [[ -f "$dir/had-transport" ]]; then
+    install -m 0755 "$dir/claudex-transport" "$TRANSPORT_BIN.new"
+    mv "$TRANSPORT_BIN.new" "$TRANSPORT_BIN"
+  else
+    rm -f "$TRANSPORT_BIN"
+  fi
+  if [[ -f "$dir/had-shunt-version" ]]; then
+    cp "$dir/shunt-version" "$STATE_ROOT/shunt-version"
+  else
+    rm -f "$STATE_ROOT/shunt-version"
+  fi
+  if [[ -f "$dir/had-codex-version" ]]; then
+    cp "$dir/codex-transport-version" "$STATE_ROOT/codex-transport-version"
+  else
+    rm -f "$STATE_ROOT/codex-transport-version"
+  fi
+}
+
+discard_runtime_rollback() {
+  if [[ -n "$UPDATE_ROLLBACK_DIR" && -d "$UPDATE_ROLLBACK_DIR" ]]; then
+    rm -rf -- "$UPDATE_ROLLBACK_DIR"
+  fi
+  UPDATE_ROLLBACK_DIR=""
+}
+
+build_latest_runtime() {
+  ensure_dirs
+  have git || die "git is required to update Claudex"
+  have cargo || die "Rust/cargo is required to update Claudex"
+  have awk || die "awk is required to update Claudex"
+  [[ -s "$SHUNT_PATCH" ]] || die "missing shunt patch: $SHUNT_PATCH"
+  [[ -s "$TRANSPORT_SRC_DIR/Cargo.toml" ]] || die "missing transport source: $TRANSPORT_SRC_DIR/Cargo.toml"
+  [[ -s "$TRANSPORT_SRC_DIR/main.rs" ]] || die "missing transport source: $TRANSPORT_SRC_DIR/main.rs"
+
+  local tmp shunt_src codex_src shunt_candidate transport_candidate shunt_rev codex_rev cleanup_cmd
+  tmp="$(mktemp -d "${TMPDIR:-/tmp}/claudex-update.XXXXXX")"
+  printf -v cleanup_cmd 'rm -rf -- %q' "$tmp"
+  trap "$cleanup_cmd" EXIT
+  shunt_src="$tmp/shunt"
+  codex_src="$tmp/codex"
+
+  note "Fetching current shunt and Codex sources..."
+  git clone --depth 1 https://github.com/pleaseai/shunt.git "$shunt_src"
+  git clone --depth 1 https://github.com/openai/codex.git "$codex_src"
+
+  note "Applying Claudex translation patch..."
+  git -C "$shunt_src" apply "$SHUNT_PATCH" || die "Claudex shunt patch no longer applies; installed runtime was left untouched"
+
+  note "Injecting Codex-native transport..."
+  mkdir -p "$codex_src/codex-rs/claudex-transport/src"
+  cp "$TRANSPORT_SRC_DIR/Cargo.toml" "$codex_src/codex-rs/claudex-transport/Cargo.toml"
+  cp "$TRANSPORT_SRC_DIR/main.rs" "$codex_src/codex-rs/claudex-transport/src/main.rs"
+  if ! grep -q '"claudex-transport"' "$codex_src/codex-rs/Cargo.toml"; then
+    awk '{ print; if ($0 ~ /    "model-provider",/) print "    \"claudex-transport\"," }' "$codex_src/codex-rs/Cargo.toml" > "$codex_src/codex-rs/Cargo.toml.new"
+    mv "$codex_src/codex-rs/Cargo.toml.new" "$codex_src/codex-rs/Cargo.toml"
+  fi
+
+  note "Testing and building translator..."
+  (
+    cd "$shunt_src"
+    CARGO_TARGET_DIR="$tmp/target-shunt" cargo test --release --locked --test responses_translate --quiet
+    CARGO_TARGET_DIR="$tmp/target-shunt" cargo build --release --locked
+  )
+  [[ -x "$tmp/target-shunt/release/shunt" ]] || die "shunt build produced no binary"
+  shunt_candidate="$tmp/shunt-candidate"
+  install -m 0755 "$tmp/target-shunt/release/shunt" "$shunt_candidate"
+  cargo clean --manifest-path "$shunt_src/Cargo.toml" --target-dir "$tmp/target-shunt" >/dev/null
+
+  note "Testing and building Codex-native transport..."
+  (
+    cd "$codex_src/codex-rs"
+    CARGO_TARGET_DIR="$tmp/target-codex" cargo build --release -p claudex-transport
+  )
+  [[ -x "$tmp/target-codex/release/claudex-transport" ]] || die "Codex transport build produced no binary"
+  transport_candidate="$tmp/transport-candidate"
+  install -m 0755 "$tmp/target-codex/release/claudex-transport" "$transport_candidate"
+
+  shunt_rev="$(git -C "$shunt_src" rev-parse HEAD)"
+  codex_rev="$(git -C "$codex_src" rev-parse HEAD)"
+
+  note "Live-testing candidate Codex transport against required models..."
+  verify_transport_candidate "$transport_candidate" "$tmp" \
+    || die "candidate Codex transport failed required-model compatibility; installed runtime was left untouched"
+
+  prepare_runtime_rollback
+  if [[ "$UPDATE_TRANSACTION" -eq 1 ]]; then
+    assert_no_active_sessions
+    stop_runtime || die "Existing runtime could not be stopped safely before installing the new binary images"
+  fi
+  install -m 0755 "$shunt_candidate" "$SHUNT_BIN.new"
+  install -m 0755 "$transport_candidate" "$TRANSPORT_BIN.new"
+  mv "$SHUNT_BIN.new" "$SHUNT_BIN"
+  mv "$TRANSPORT_BIN.new" "$TRANSPORT_BIN"
+  printf '%s\n' "$shunt_rev" > "$STATE_ROOT/shunt-version"
+  printf '%s\n' "$codex_rev" > "$STATE_ROOT/codex-transport-version"
+  rm -rf -- "$tmp"
+  trap - EXIT
+}
+
+ensure_runtime() {
+  runtime_present && return 0
+  build_latest_runtime
+}
+
+setup_all() {
+  ensure_dirs
+  ensure_claude
+  if native_chatgpt_enabled; then
+    have node || die "Node.js 22+ is required for native SIWC"
+  fi
+  if ! native_chatgpt_enabled && ! codex_logged_in; then
+    die "No ChatGPT connection found. Run 'claudex login' first."
+  fi
+  ensure_runtime
+  write_shunt_config
+  write_claude_settings
+  write_agents
+  SHUNT_CLIENT_TOKENS="claudex:$(client_token)" CLAUDEX_TRANSPORT_TOKEN="$(transport_token)" "$SHUNT_BIN" --config "$SHUNT_CFG" check >/dev/null
+  note "Claudex $VERSION is configured."
+}
+
+update_all() {
+  # Moving upstream HEADs are not a reproducible public-beta update path.
+  # Never fetch arbitrary latest sources or call paid-plan models by default.
+  if [[ "$(printenv CLAUDEX_ALLOW_UNPINNED_UPDATE 2>/dev/null || true)" != 1 ]]; then
+    die "Unpinned Claudex source updates are disabled in the 0.6 preview. Use a verified pinned build; advanced developers may explicitly set CLAUDEX_ALLOW_UNPINNED_UPDATE=1."
+  fi
+  check_prereqs
+  update_claude
+  UPDATE_TRANSACTION=1
+  build_latest_runtime
+  write_shunt_config
+  write_claude_settings
+  write_agents
+
+  if (
+    set -e
+    SHUNT_CLIENT_TOKENS="claudex:$(client_token)" CLAUDEX_TRANSPORT_TOKEN="$(transport_token)" "$SHUNT_BIN" --config "$SHUNT_CFG" check >/dev/null
+    stop_runtime
+    write_shunt_config
+    write_claude_settings
+    start_gateway
+    smoke_gateway
+  ); then
+    discard_runtime_rollback
+    UPDATE_TRANSACTION=0
+    note "Claudex, Claude Code, shunt, and the embedded Codex transport are up to date."
+    return 0
+  fi
+
+  note "Updated runtime failed post-install verification; restoring the previous runtime."
+  stop_runtime || true
+  if restore_runtime_rollback; then
+    if start_gateway; then
+      note "Previous Claudex runtime restored and restarted."
+    else
+      note "Previous runtime files were restored but could not be restarted automatically."
+    fi
+  else
+    note "No rollback snapshot was available."
+  fi
+  discard_runtime_rollback
+  UPDATE_TRANSACTION=0
+  die "Claudex update failed post-install verification and was rolled back"
+}
+
+# Call with the runtime lifecycle lock held. A previous launcher may have
+# been SIGKILLed before stop_runtime could revoke its file-based bearer tokens.
+# Revoke orphaned tokens exactly once BEFORE regenerating configs/settings for
+# a new daemon; never rotate credentials while either managed hop is alive.
+prepare_fresh_runtime_credentials() {
+  ensure_dirs
+  [[ ! -L "$SECRETS_ROOT" ]] || die "Refusing symlinked Claudex secrets directory"
+  local credential
+  for credential in "$CLIENT_TOKEN_FILE" "$TRANSPORT_TOKEN_FILE"; do
+    [[ ! -L "$credential" ]] || die "Refusing symlinked Claudex session token"
+  done
+  if ! pid_running "$SHUNT_PID" && ! pid_running "$TRANSPORT_PID"; then
+    rm -f -- "$CLIENT_TOKEN_FILE" "$TRANSPORT_TOKEN_FILE"
+  fi
+}
+
+start_persistent_runtime() {
+  check_prereqs
+  runtime_present || setup_all
+  prepare_fresh_runtime_credentials
+  write_shunt_config
+  write_claude_settings
+  start_gateway
+  : > "$RUNTIME_PERSISTENT"
+  rm -f -- "$RUNTIME_EPHEMERAL"
+}
+
+stop_idle_runtime() {
+  assert_no_active_sessions
+  stop_runtime || return 1
+  rm -f -- "$RUNTIME_PERSISTENT" "$RUNTIME_EPHEMERAL"
+}
+
+launch_prepare() {
+  check_prereqs
+  runtime_present || setup_all
+  prepare_fresh_runtime_credentials
+  [[ -f "$settings" ]] || setup_all
+  write_shunt_config
+  write_claude_settings
+  # The first interactive session owns an ephemeral runtime. Each subsequent
+  # session receives a lease; the final one performs cleanup/credential rotation.
+  if ! gateway_ready && ! transport_ready && [[ ! -f "$RUNTIME_PERSISTENT" ]]; then
+    : > "$RUNTIME_EPHEMERAL"
+  fi
+  start_gateway
+  mkdir -p "$SESSION_DIR"
+  [[ ! -e "$LAUNCH_LEASE" && ! -L "$LAUNCH_LEASE" ]] || die "Conflicting Claudex session lease"
+  printf '%s\n' "$$" > "$LAUNCH_LEASE"
+}
+
+launch_unregister() {
+  rm -f -- "$LAUNCH_LEASE"
+  if [[ -f "$RUNTIME_EPHEMERAL" && ! -f "$RUNTIME_PERSISTENT" ]] && ! active_session_leases; then
+    if stop_runtime 1; then
+      rm -f -- "$RUNTIME_EPHEMERAL"
+    else
+      note "Warning: the last Claudex session could not stop its ephemeral runtime."
+    fi
+  fi
+}
+
+launch_cleanup() {
+  # Preserve Claude Code's original return code. An OS signal/early exit
+  # also attempts to release the lease; SIGKILL is cleaned on the next launch.
+  trap - EXIT
+  [[ -z "$LAUNCH_LEASE" ]] || with_runtime_lock launch_unregister || note "Warning: Claudex session lease cleanup needs attention."
+}
+
+# Read-only, provider-neutral diagnostic. Never print credential values or
+# edit native Claude Code settings owned by the user.
+claude_settings_conflicts() {
+  have node || return 0
+  node - "$HOME/.claude/settings.json" "$PWD/.claude/settings.json" "$PWD/.claude/settings.local.json" <<'NODE'
+const fs = require('node:fs');
+const keys = [
+  'ANTHROPIC_BASE_URL', 'ANTHROPIC_API_KEY', 'ANTHROPIC_AUTH_TOKEN',
+  'ANTHROPIC_MODEL', 'ANTHROPIC_SMALL_FAST_MODEL',
+  'ANTHROPIC_DEFAULT_SONNET_MODEL', 'ANTHROPIC_DEFAULT_OPUS_MODEL',
+  'ANTHROPIC_DEFAULT_HAIKU_MODEL', 'ANTHROPIC_DEFAULT_FABLE_MODEL'
+];
+for (const path of new Set(process.argv.slice(2))) {
+  let config;
+  try { config = JSON.parse(fs.readFileSync(path, 'utf8')); }
+  catch (error) {
+    if (error.code !== 'ENOENT') console.log('Unreadable Claude Code settings: ' + path);
+    continue;
+  }
+  const env = config?.env ?? {};
+  const found = keys.filter(key => typeof env[key] === 'string' && env[key].length > 0);
+  if (found.length) console.log(path + ': ' + found.join(', '));
+}
+NODE
+}
+
+doctor() {
+  local failed=0
+  printf '%-32s %s\n' "Claudex" "$VERSION"
+  printf '%-32s %s\n' "Claude Code" "$(claude --version 2>/dev/null || echo MISSING)"
+  printf '%-32s %s\n' "Codex CLI" "$(codex --version 2>/dev/null || echo OPTIONAL/MISSING)"
+  local setting_warnings
+  setting_warnings="$(claude_settings_conflicts 2>/dev/null)" || setting_warnings="Could not inspect native Claude settings"
+  if [[ -n "$setting_warnings" ]]; then
+    printf '%-32s %s\n' "Claude settings overrides" "REVIEW"
+    printf '%s\n' "$setting_warnings"
+    note "Global/project Claude Code provider settings may override the Claudex session. Keep alternative providers in opt-in settings, not global env keys."
+  else
+    printf '%-32s %s\n' "Claude settings overrides" "NONE DETECTED"
+  fi
+  if native_chatgpt_logged_in; then
+    printf '%-32s %s\n' "Auth mode" "Native Sign in with ChatGPT"
+  elif codex_logged_in; then
+    printf '%-32s %s\n' "Auth mode" "Legacy Codex login fallback"
+  else
+    printf '%-32s %s\n' "Auth mode" "DISCONNECTED"
+    failed=1
+  fi
+  printf '%-32s %s\n' "Translator" "$([[ -x "$SHUNT_BIN" ]] && echo "$SHUNT_BIN" || echo MISSING)"
+  printf '%-32s %s\n' "Codex-native transport" "$([[ -x "$TRANSPORT_BIN" ]] && echo "$TRANSPORT_BIN" || echo MISSING)"
+  printf '%-32s %s\n' "Shunt source revision" "$([[ -f "$STATE_ROOT/shunt-version" ]] && cut -c1-12 "$STATE_ROOT/shunt-version" || echo UNKNOWN)"
+  printf '%-32s %s\n' "Codex source revision" "$([[ -f "$STATE_ROOT/codex-transport-version" ]] && cut -c1-12 "$STATE_ROOT/codex-transport-version" || echo UNKNOWN)"
+  if [[ -x "$SHUNT_BIN" && -f "$SHUNT_CFG" ]] && SHUNT_CLIENT_TOKENS="claudex:$(client_token)" CLAUDEX_TRANSPORT_TOKEN="$(transport_token)" "$SHUNT_BIN" --config "$SHUNT_CFG" check >/dev/null 2>&1; then
+    printf '%-32s %s\n' "Translator config" OK
+  else
+    printf '%-32s %s\n' "Translator config" FAILED
+    failed=1
+  fi
+  local transport_image gateway_image transport_state gateway_state
+  if transport_ready; then
+    transport_state="READY ($TRANSPORT_URL)"
+    transport_image="$(runtime_image_status "$TRANSPORT_PID" "$TRANSPORT_BIN")"
+    case "$transport_image" in STALE|UNMANAGED|MISSING|UNKNOWN) failed=1 ;; esac
+  elif pid_running "$TRANSPORT_PID"; then
+    transport_state="NOT READY ($TRANSPORT_URL)"
+    transport_image="$(runtime_image_status "$TRANSPORT_PID" "$TRANSPORT_BIN")"
+    failed=1
+  else
+    transport_state="STOPPED"
+    transport_image="STOPPED"
+  fi
+  if gateway_ready; then
+    gateway_state="READY ($BASE_URL)"
+    gateway_image="$(runtime_image_status "$SHUNT_PID" "$SHUNT_BIN")"
+    case "$gateway_image" in STALE|UNMANAGED|MISSING|UNKNOWN) failed=1 ;; esac
+  elif pid_running "$SHUNT_PID"; then
+    gateway_state="NOT READY ($BASE_URL)"
+    gateway_image="$(runtime_image_status "$SHUNT_PID" "$SHUNT_BIN")"
+    failed=1
+  else
+    gateway_state="STOPPED"
+    gateway_image="STOPPED"
+  fi
+  printf '%-32s %s\n' "Codex transport" "$transport_state"
+  printf '%-32s %s\n' "Codex transport image" "$transport_image"
+  printf '%-32s %s\n' "Claude gateway" "$gateway_state"
+  printf '%-32s %s\n' "Claude gateway image" "$gateway_image"
+  have claude || failed=1
+  have node || failed=1
+  runtime_present || failed=1
+  native_chatgpt_logged_in || codex_logged_in || failed=1
+  return "$failed"
+}
+
+smoke_gateway() {
+  # A smoke test explicitly starts a persistent runtime so a later interactive
+  # session cannot mistakenly treat that long-lived daemon as its own.
+  with_runtime_lock start_persistent_runtime
+
+  local out payload
+  out="$STATE_ROOT/smoke-gateway.$$.log"
+  payload='{"model":"gpt-6-luna[1m]","max_tokens":64,"stream":true,"messages":[{"role":"user","content":"Reply with exactly OK."}]}'
+  curl -fsS -N --max-time 90     -H "Authorization: Bearer $(client_token)"     -H "content-type: application/json"     -H "anthropic-version: 2023-06-01"     --data "$payload" "$BASE_URL/v1/messages" > "$out" || {
+      tail -n 80 "$out" >&2 || true
+      die "gateway smoke request failed"
+    }
+  if grep -q '"type":"error"' "$out" || grep -q '^event: error' "$out"; then
+    tail -n 80 "$out" >&2 || true
+    die "gateway smoke request returned an error event"
+  fi
+  grep -q 'message_stop' "$out" || die "gateway smoke request did not complete"
+  grep -q 'OK' "$out" || die "gateway smoke response did not contain OK"
+  note "Gateway smoke test passed."
+}
+
+smoke_claude() {
+  smoke_gateway
+  local output
+  export ANTHROPIC_BASE_URL="$BASE_URL"
+  unset ANTHROPIC_API_KEY ANTHROPIC_MODEL ANTHROPIC_SMALL_FAST_MODEL \
+        ANTHROPIC_DEFAULT_HAIKU_MODEL ANTHROPIC_DEFAULT_SONNET_MODEL \
+        ANTHROPIC_DEFAULT_OPUS_MODEL ANTHROPIC_DEFAULT_FABLE_MODEL 2>/dev/null || true
+  export ANTHROPIC_AUTH_TOKEN="$(client_token)"
+  export ENABLE_TOOL_SEARCH=true
+  export MCP_CONNECTION_NONBLOCKING=true
+  export CLAUDE_CODE_ATTRIBUTION_HEADER=0
+  export CLAUDE_CODE_GATEWAY_HINT_HEADERS=1
+  export CLAUDE_CODE_AUTO_COMPACT_WINDOW="272000"
+  export CLAUDE_CODE_ENABLE_FINE_GRAINED_TOOL_STREAMING=1
+
+  output="$(claude --settings "$CLAUDE_SETTINGS_LUNA" -p "Reply with exactly OK." 2>&1)" || {
+    printf '%s\n' "$output" >&2
+    die "Claude Code smoke request failed"
+  }
+  printf '%s\n' "$output"
+  printf '%s\n' "$output" | grep -q 'OK' || die "Claude Code smoke response did not contain OK"
+  note "Full Claude Code harness smoke test passed."
+}
+
+launch() {
+  local coordinator="${1:-sol}" settings claude_rc=0
+  local -a fast_args=()
+  [[ "${CLAUDEX_FAST_MODE:-0}" == 1 ]] && fast_args=(--bare)
+  shift || true
+  local selected_model
+  case "$coordinator" in
+    sol) settings="$CLAUDE_SETTINGS_SOL"; selected_model="gpt-6.1-sol[1m]" ;;
+    astra) settings="$CLAUDE_SETTINGS_ASTRA"; selected_model="gpt-6-astra[1m]" ;;
+    luna) settings="$CLAUDE_SETTINGS_LUNA"; selected_model="gpt-6-luna[1m]" ;;
+    *) die "unknown coordinator '$coordinator' (expected sol, astra, or luna)" ;;
+  esac
+
+  LAUNCH_LEASE="$SESSION_DIR/$$"
+  with_runtime_lock launch_prepare
+  trap 'launch_cleanup' EXIT
+  trap 'exit 129' HUP
+  trap 'exit 130' INT
+  trap 'exit 143' TERM
+
+  export ANTHROPIC_BASE_URL="$BASE_URL"
+  unset ANTHROPIC_API_KEY ANTHROPIC_MODEL ANTHROPIC_SMALL_FAST_MODEL \
+        ANTHROPIC_DEFAULT_HAIKU_MODEL ANTHROPIC_DEFAULT_SONNET_MODEL \
+        ANTHROPIC_DEFAULT_OPUS_MODEL ANTHROPIC_DEFAULT_FABLE_MODEL 2>/dev/null || true
+  export ANTHROPIC_AUTH_TOKEN="$(client_token)"
+  export ENABLE_TOOL_SEARCH=true
+  export MCP_CONNECTION_NONBLOCKING=true
+  export CLAUDE_CODE_ATTRIBUTION_HEADER=0
+  export CLAUDE_CODE_GATEWAY_HINT_HEADERS=1
+  export CLAUDE_CODE_PACKAGE_MANAGER_AUTO_UPDATE=1
+  export CLAUDE_CODE_AUTO_COMPACT_WINDOW="272000"
+  export CLAUDE_CODE_ENABLE_FINE_GRAINED_TOOL_STREAMING=1
+
+  # Do not exec: we need to tear down an ephemeral runtime after Claude exits.
+  set +e
+  claude ${fast_args[@]+"${fast_args[@]}"} --settings "$settings" --model "$selected_model" "$@"
+  claude_rc=$?
+  set -e
+  # EXIT trap unregisters this launcher; it must not stop other sessions.
+  return "$claude_rc"
+}
+
+uninstall_all() {
+  assert_no_active_sessions
+  # If managed processes remain, never remove the executable images they run.
+  stop_runtime || die "Uninstall aborted: could not stop Claudex services"
+  # Remove only explicit app-managed files. Do NOT rm -rf user-configurable
+  # roots: they can contain encrypted SIWC profiles and unrelated user data.
+  rm -f -- "$SHUNT_CFG" "$CLAUDE_SETTINGS_SOL" "$CLAUDE_SETTINGS_ASTRA" "$CLAUDE_SETTINGS_LUNA"
+  rm -f -- "$DATA_ROOT/launcher" "$DATA_ROOT/shunt" "$DATA_ROOT/claudex-transport" \
+    "$DATA_ROOT/claudex-siwc.mjs" "$DATA_ROOT/patches/claudex-shunt.patch" \
+    "$DATA_ROOT/transport-source/Cargo.toml" "$DATA_ROOT/transport-source/main.rs"
+  rm -f -- "$STATE_ROOT/shunt.pid" "$STATE_ROOT/transport.pid" \
+    "$STATE_ROOT/shunt-version" "$STATE_ROOT/codex-transport-version" \
+    "$CLIENT_TOKEN_FILE" "$TRANSPORT_TOKEN_FILE"
+  # Remove the shim only if the installer originally created it and the
+  # installed bytes still match; preserve any dotfile/package-manager edit.
+  if [[ -f "$DATA_ROOT/installer-owned-wrapper" ]] \
+      && [[ -f "$DATA_ROOT/installed-wrapper-reference" ]] \
+      && cmp -s "$BIN_ROOT/claudex" "$DATA_ROOT/installed-wrapper-reference"; then
+    rm -f -- "$BIN_ROOT/claudex"
+  else
+    note "Preserved externally managed or modified Claudex command wrapper."
+  fi
+  rm -f -- "$DATA_ROOT/installer-owned-wrapper" "$DATA_ROOT/installed-wrapper-reference"
+  rmdir "$DATA_ROOT/patches" "$DATA_ROOT/transport-source" 2>/dev/null || true
+  rmdir "$SESSION_DIR" 2>/dev/null || true
+  rm -f -- "$RUNTIME_PERSISTENT" "$RUNTIME_EPHEMERAL"
+  rmdir "$SECRETS_ROOT" "$STATE_ROOT" 2>/dev/null || true
+  rmdir "$CFG_ROOT" 2>/dev/null || true
+  # Remove agent files only if they still match Claudex's own recorded
+  # installation. Older untracked agents and user edits are always preserved.
+  local agent destination reference
+  for agent in gpt-fast.md gpt-fast-deep.md gpt-core.md gpt-core-deep.md gpt-expert.md; do
+    destination="$AGENTS_DIR/$agent"
+    reference="$DATA_ROOT/agents-owned/$agent"
+    if [[ -f "$reference" && -f "$destination" && ! -L "$destination" ]] \
+        && cmp -s "$destination" "$reference"; then
+      rm -f -- "$destination"
+    elif [[ -e "$destination" || -L "$destination" ]]; then
+      note "Preserving existing or edited Claude Code agent: $destination"
+    fi
+    rm -f -- "$reference" "$DATA_ROOT/agents-staging/$agent"
+  done
+  rmdir "$DATA_ROOT/agents-owned" "$DATA_ROOT/agents-staging" "$DATA_ROOT" 2>/dev/null || true
+  note "Removed app-managed Claudex files; encrypted SIWC connections and unrelated user data preserved. Use 'claudex logout' or 'disconnect' explicitly to revoke authentication."
+}
+
+cmd="${1:-sol}"
+case "$cmd" in
+  -h|--help|help) usage ;;
+  --version)
+    # Third-party Claude Code integrations (notably T3 Code) use --version to
+    # check which *Claude Code executable* they will run. Report the real CLI
+    # version rather than our independent Claudex package version.
+    have claude || die "Claude Code is missing; run: claudex setup"
+    claude --version
+    ;;
+  version|--claudex-version) echo "Claudex $VERSION" ;;
+  setup) setup_all ;;
+  login) login_chatgpt ;;
+  auth-status) auth_status ;;
+  logout) with_runtime_lock logout_chatgpt ;;
+  update) with_runtime_lock update_all ;;
+  doctor) doctor ;;
+  smoke) smoke_gateway ;;
+  smoke-claude) smoke_claude ;;
+  start) with_runtime_lock start_persistent_runtime ;;
+  restart) with_runtime_lock restart_runtime ;;
+  stop) with_runtime_lock stop_idle_runtime ;;
+  uninstall) with_runtime_lock uninstall_all ;;
+  fast|--fast)
+    shift || true
+    fast_model=sol
+    case "${1:-}" in
+      sol|astra|luna) fast_model="$1"; shift ;;
+    esac
+    [[ "${1:-}" == "--" ]] && shift
+    CLAUDEX_FAST_MODE=1 launch "$fast_model" "$@"
+    ;;
+  sol|astra|luna)
+    shift || true
+    [[ "${1:-}" == "--" ]] && shift
+    launch "$cmd" "$@"
+    ;;
+  --)
+    shift
+    launch sol "$@"
+    ;;
+  *)
+    launch sol "$@"
+    ;;
+esac

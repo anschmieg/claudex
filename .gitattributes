@@ -1,0 +1,3 @@
+# The Shunt patch is data: added blank lines may have a significant
+# single-space prefix. Never alter its exact pinned-source patch bytes.
+patches/*.patch whitespace=-blank-at-eol
