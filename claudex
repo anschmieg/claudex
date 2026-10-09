@@ -925,6 +925,10 @@ setup_all() {
     die "No ChatGPT connection found. Run 'claudex login' first."
   fi
   ensure_runtime
+  # Validate/generate credentials in the parent shell before any config writes.
+  # A failure inside $(client_token) used as an environment assignment below
+  # cannot reliably abort setup, and may let shunt check hang on macOS.
+  ensure_runtime_tokens
   write_shunt_config
   write_claude_settings
   write_agents
