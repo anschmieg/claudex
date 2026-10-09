@@ -26,6 +26,18 @@ node --test source/siwc-helper/keychain-store.test.mjs source/siwc-helper/secret
 
 These adapters are independently written and can be tested with synthetic values only. Passing these tests is not evidence that SIWC login/refresh is available to an arbitrary user account.
 
+### Real Linux Secret Service integration (synthetic values)
+
+A separate path-scoped public CI workflow exercises a **real, temporary GNOME Keyring/Secret Service** on Linux x86-64 and ARM64 without a ChatGPT account or bundled DevKit. It verifies encryption, decryption in a new adapter instance, isolation across accounts, and refusal to store the synthetic plaintext.
+
+To reproduce on a disposable Linux environment with `gnome-keyring`, `libsecret-tools` and `dbus-run-session` installed:
+
+~~~bash
+CLAUDEX_TEST_ISOLATED_KEYRING=1 dbus-run-session -- bash tools/test-real-linux-keyring.sh
+~~~
+
+The test requires an explicitly isolated D-Bus session, creates a temporary HOME, and uses only fixed synthetic values. It must not be run inside an existing desktop keyring session. The test proves storage adapter behavior, **not** real SIWC authentication, permission to use a ChatGPT plan, or compliance with its connected-application terms.
+
 ## Synthetic fresh-user installer regression
 
 The installer currently expects a helper bundle in auth/claudex-siwc.mjs. That bundle is **not shipped**. CI provides a short-lived, ignored placeholder that exits without performing any authentication:
