@@ -34,7 +34,7 @@ jobs:
             arch: linux-x86_64
     env:
       CLAUDEX_BUILD_JOBS: "2"
-      CLAUDEX_BUILD_WORKDIR: ${{ runner.temp }}/harness-native-build
+      CLAUDEX_BUILD_WORKDIR: ${{ github.workspace }}/.claudex-native-build
     steps:
       - name: Checkout curated public source
         uses: actions/checkout@v4
