@@ -71,7 +71,10 @@ jobs:
         run: |
           test -x "bin/${{ matrix.arch }}/shunt"
           test -x "bin/${{ matrix.arch }}/claudex-transport"
-          python3 tools/audit-release.py .
+          # Source is checked by audit-public-source.py before builds.
+          # Audit actual distributable executables here, not Cargo's temporary
+          # checkout/depfile cache (which contains builder paths by design).
+          python3 tools/audit-release.py "bin/${{ matrix.arch }}"
           if [[ "$RUNNER_OS" == macOS ]]; then
             shasum -a 256 "bin/${{ matrix.arch }}"/*
           else
