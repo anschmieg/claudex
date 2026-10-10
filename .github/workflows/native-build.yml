@@ -12,10 +12,25 @@ permissions:
   contents: read
 
 jobs:
+  fast-checks:
+    name: Fast launcher and source checks
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: Source and shell syntax
+        run: |
+          python3 tools/audit-public-source.py
+          bash -n claudex
+          python3 -m py_compile tools/test-launcher-concurrency.py tools/test-local-auth.py
+      - name: Test launcher without building native binaries
+        run: python3 tools/test-launcher-port-guard.py
+
   native-rust:
     name: ${{ matrix.label }}
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 120
+    needs: fast-checks
     strategy:
       fail-fast: false
       matrix:
@@ -43,6 +58,19 @@ jobs:
         run: python3 tools/audit-public-source.py
       - name: Install stable Rust
         uses: dtolnay/rust-toolchain@stable
+      # Cache dependency downloads and the expensive Codex target directory.
+      # Key on exact pinned source and compiler, so a changed upstream or
+      # transport source never silently reuses incompatible artifacts.
+      - name: Restore Rust build cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            .claudex-native-build/target-codex
+          key: native-rust-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('CODEX_REVISION', 'SHUNT_REVISION', 'transport-source/**', 'patches/claudex-shunt.patch') }}-v1
+          restore-keys: |
+            native-rust-${{ runner.os }}-${{ runner.arch }}-
       - name: Build pinned shunt and secure Codex transport
         shell: bash
         run: bash tools/build-pinned-runtime.sh
