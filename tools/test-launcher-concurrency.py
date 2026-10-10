@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Native four-platform Claudex session smoke; synthetic auth, zero inference."""
-import os, platform, socket, subprocess, sys, tempfile, time, urllib.request, urllib.error
+import os, platform, socket, subprocess, sys, tempfile, time, threading, urllib.request, urllib.error
 from pathlib import Path
 
 root = Path(__file__).resolve().parent.parent
@@ -217,19 +217,40 @@ echo SYNTHETIC_CLIENT_CONNECTED=PASS
         # probes cannot be relied upon; verify raw TCP occupancy vetoes it.
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as occupied:
             occupied.bind(("127.0.0.1", 0))
-            occupied.listen(1)
+            occupied.listen(16)
             fake_port = occupied.getsockname()[1]
             blocked_env = {**env, "CLAUDEX_TRANSPORT_PORT": str(fake_port)}
-            denied = run(app, blocked_env, "start", success=False)
-            assert "still accepts connections" in denied.stderr
-            assert not token_file.exists()
-            assert not (private / "transport-token").exists()
-            # Setup can generate bearer files without starting a daemon.
-            # The lower-level token generator must independently fail closed.
-            denied_setup = run(app, blocked_env, "setup", success=False)
-            assert "refusing to replace missing or invalid runtime credentials" in denied_setup.stderr
-            assert not token_file.exists()
-            assert not (private / "transport-token").exists()
+            # Drain probe connections. A listen(1) socket that never accepts
+            # accumulates completed connects; on macOS the backlog saturates
+            # after start probes and makes the following setup probe appear
+            # to see a closed port even though the listener is still bound.
+            occupied.settimeout(0.1)
+            serving = threading.Event()
+            serving.set()
+            def drain_probe_connections():
+                while serving.is_set():
+                    try:
+                        conn, _ = occupied.accept()
+                    except socket.timeout:
+                        continue
+                    except OSError:
+                        break
+                    conn.close()
+            acceptor = threading.Thread(target=drain_probe_connections, daemon=True)
+            acceptor.start()
+            try:
+                denied = run(app, blocked_env, "start", success=False)
+                assert "still accepts connections" in denied.stderr
+                assert not token_file.exists()
+                assert not (private / "transport-token").exists()
+                # Setup must independently reject the still-accepting port.
+                denied_setup = run(app, blocked_env, "setup", success=False)
+                assert "refusing to replace missing or invalid runtime credentials" in denied_setup.stderr
+                assert not token_file.exists()
+                assert not (private / "transport-token").exists()
+            finally:
+                serving.clear()
+                acceptor.join(timeout=2)
         print("UNRELATED_TCP_LISTENER_BLOCKS_FRESH_TOKEN_GENERATION=PASS")
         print(f"NATIVE_LAUNCHER_SMOKE=PASS target={target} model_requests=0")
     finally:
