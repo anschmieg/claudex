@@ -934,6 +934,12 @@ setup_all() {
   if ! native_chatgpt_enabled && ! codex_logged_in; then
     die "No ChatGPT connection found. Run 'claudex login' first."
   fi
+  # Setup must not treat an untracked listener as safe simply because some
+  # previously generated token files remain valid. An unrelated process can
+  # occupy either configured port, so reject before touching configuration.
+  if ! pid_running "$SHUNT_PID" && ! pid_running "$TRANSPORT_PID" && local_listener_present; then
+    die "Claudex localhost port is still occupied; refusing to replace missing or invalid runtime credentials"
+  fi
   ensure_runtime
   # Validate/generate credentials in the parent shell before any config writes.
   # A failure inside $(client_token) used as an environment assignment below
