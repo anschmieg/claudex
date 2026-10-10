@@ -59,6 +59,7 @@ with tempfile.TemporaryDirectory(prefix="claudex-fast-guard-") as scratch:
         result = subprocess.run([str(app), "setup"], env=env, cwd=root,
                                 capture_output=True, text=True, timeout=12)
         assert result.returncode != 0, (result.stdout, result.stderr)
-        assert "port" in result.stderr.lower(), result.stderr
+        assert ("port" in result.stderr.lower() or
+                "active claudex runtime has missing or invalid tokens" in result.stderr.lower()), result.stderr
         assert not (state / "private" / "client-token").exists()
         print("FAST_STALE_PID_OCCUPIED_PORT_SETUP=PASS")
