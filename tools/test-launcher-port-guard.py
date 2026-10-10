@@ -28,6 +28,10 @@ with tempfile.TemporaryDirectory(prefix="claudex-fast-guard-") as scratch:
         listener.bind(("127.0.0.1", 0))
         listener.listen(2)
         port = listener.getsockname()[1]
+        # Exercise the transport-port path independently of the gateway port.
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as spare:
+            spare.bind(("127.0.0.1", 0))
+            gateway_port = spare.getsockname()[1]
         env = {**os.environ,
                "HOME": str(home),
                "PATH": str(bindir) + os.pathsep + os.environ.get("PATH", ""),
@@ -36,7 +40,7 @@ with tempfile.TemporaryDirectory(prefix="claudex-fast-guard-") as scratch:
                "CLAUDEX_DATA_HOME": str(temp / "data"),
                "CLAUDEX_SHUNT_BIN": str(shunt),
                "CLAUDEX_TRANSPORT_BIN": str(transport),
-               "CLAUDEX_PORT": str(port),
+               "CLAUDEX_PORT": str(gateway_port),
                "CLAUDEX_TRANSPORT_PORT": str(port),
                "CLAUDEX_AUTH_MODE": "siwc"}
         for command in ("setup", "start"):
