@@ -52,3 +52,13 @@ with tempfile.TemporaryDirectory(prefix="claudex-fast-guard-") as scratch:
             assert not (private / "client-token").exists()
             assert not (private / "transport-token").exists()
             print(f"FAST_UNTRACKED_LISTENER_{command.upper()}=PASS")
+        # A stale/reused PID must not override the live TCP occupancy veto.
+        state = temp / "state"
+        state.mkdir(exist_ok=True)
+        (state / "transport.pid").write_text(str(os.getpid()))
+        result = subprocess.run([str(app), "setup"], env=env, cwd=root,
+                                capture_output=True, text=True, timeout=12)
+        assert result.returncode != 0, (result.stdout, result.stderr)
+        assert "port" in result.stderr.lower(), result.stderr
+        assert not (state / "private" / "client-token").exists()
+        print("FAST_STALE_PID_OCCUPIED_PORT_SETUP=PASS")
