@@ -131,6 +131,38 @@ assert_no_active_sessions() {
   fi
 }
 
+# Establish TCP listener presence independently from HTTP readiness or bearer
+# authorization. A daemon can be alive but return 401/503, or lose its PID
+# file; those cases must not cause live credentials to be rotated or erased.
+# This check DOES NOT authenticate the peer; it is a conservative veto only.
+# macOS system Bash may lack /dev/tcp support. Use a bounded Python socket
+# connection instead, uniformly on macOS and Linux.
+loopback_port_accepts_tcp() {
+  local port="$1"
+  # macOS ships Bash 3.2, whose regex implementation differs from
+  # modern Linux Bash. Validate port syntax/range in Python instead.
+  have python3 || die "Python 3 is required to verify localhost port occupancy safely"
+  python3 - "$port" <<'PY'
+import socket
+import sys
+value = sys.argv[1]
+if not value.isascii() or not value.isdecimal():
+    sys.exit(2)
+port = int(value)
+if not 1 <= port <= 65535:
+    sys.exit(2)
+try:
+    with socket.create_connection(("127.0.0.1", port), timeout=0.5):
+        sys.exit(0)
+except (OSError, TimeoutError):
+    sys.exit(1)
+PY
+}
+
+local_listener_present() {
+  loopback_port_accepts_tcp "$GATEWAY_PORT" || loopback_port_accepts_tcp "$TRANSPORT_PORT"
+}
+
 # Two independent per-runtime secrets: Claude Code -> shunt, then shunt ->
 # Codex transport. Secrets exist only in an owner-only private state folder.
 # Only pre-approved, session-aware clients should receive the bearer token.
@@ -169,6 +201,9 @@ ensure_runtime_tokens() (
   fi
   if pid_running "$SHUNT_PID" || pid_running "$TRANSPORT_PID"; then
     die "Active Claudex runtime has missing or invalid tokens; stop it before rotating local credentials"
+  fi
+  if local_listener_present; then
+    die "Claudex localhost port is still occupied; refusing to replace missing or invalid runtime credentials"
   fi
   for file in "$CLIENT_TOKEN_FILE" "$TRANSPORT_TOKEN_FILE"; do
     [[ ! -L "$file" ]] || die "Refusing symlinked Claudex session token"
@@ -669,8 +704,10 @@ stop_runtime() {
   # Missing PID files are NOT evidence of shutdown. An untracked but live
   # process can still hold a valid bearer token in memory after file deletion.
   # Fail closed and retain credentials until the listener is safely stopped.
-  if gateway_ready || transport_ready; then
-    note "Claudex localhost gateway or transport is still reachable after shutdown; refusing to claim token revocation."
+  # Readiness probes alone can fail while a stale or untracked process is
+  # still bound to a local port. Check raw TCP before deleting either token.
+  if local_listener_present; then
+    note "Claudex localhost listener is still bound after shutdown; refusing to claim token revocation."
     failed=1
   fi
   if [[ "$failed" -eq 0 ]] && ! pid_running "$SHUNT_PID" && ! pid_running "$TRANSPORT_PID"; then
@@ -903,7 +940,20 @@ setup_all() {
   if ! native_chatgpt_enabled && ! codex_logged_in; then
     die "No ChatGPT connection found. Run 'claudex login' first."
   fi
+  # Setup must not treat an untracked listener as safe simply because some
+  # previously generated token files remain valid. An unrelated process can
+  # occupy either configured port, so reject before touching configuration.
+  # Do not trust PID files here: on macOS a stale/reused PID can appear
+  # live even though an unrelated process owns the configured TCP port.
+  # Setup does not need a listener to be running; refuse occupied ports.
+  if local_listener_present; then
+    die "Claudex localhost port is still occupied; refusing to replace missing or invalid runtime credentials"
+  fi
   ensure_runtime
+  # Validate/generate credentials in the parent shell before any config writes.
+  # A failure inside $(client_token) used as an environment assignment below
+  # cannot reliably abort setup, and may let shunt check hang on macOS.
+  ensure_runtime_tokens
   write_shunt_config
   write_claude_settings
   write_agents
@@ -968,6 +1018,10 @@ prepare_fresh_runtime_credentials() {
     [[ ! -L "$credential" ]] || die "Refusing symlinked Claudex session token"
   done
   if ! pid_running "$SHUNT_PID" && ! pid_running "$TRANSPORT_PID"; then
+    # Missing or stale PID files do not prove a socket is closed. Fail
+    # closed if any process is still accepting TCP connections on either
+    # configured port, even if its HTTP health probe returns an error.
+    local_listener_present && die "Claudex listener still accepts connections without tracked processes; refusing to rotate active credentials"
     rm -f -- "$CLIENT_TOKEN_FILE" "$TRANSPORT_TOKEN_FILE"
   fi
 }
