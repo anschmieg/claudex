@@ -222,6 +222,9 @@ echo SYNTHETIC_CLIENT_CONNECTED=PASS
             previous_port = old_listener.getsockname()[1]
             old_listener.settimeout(0.1)
             (private / "runtime-ports").write_text(f"{gateway_port} {previous_port}\n")
+            stale_client, stale_transport = "ef" * 32, "ab" * 32
+            token_file.write_text(stale_client)
+            (private / "transport-token").write_text(stale_transport)
             with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as spare:
                 spare.bind(("127.0.0.1", 0))
                 new_port = spare.getsockname()[1]
@@ -230,8 +233,10 @@ echo SYNTHETIC_CLIENT_CONNECTED=PASS
             assert "refusing to rotate active credentials" in rejected.stderr
             rejected_setup = run(app, switched_env, "setup", success=False)
             assert "port is still occupied" in rejected_setup.stderr
-            assert not token_file.exists()
-            assert not (private / "transport-token").exists()
+            assert token_file.read_text() == stale_client
+            assert (private / "transport-token").read_text() == stale_transport
+        token_file.unlink()
+        (private / "transport-token").unlink()
         (private / "runtime-ports").write_text(f"{gateway_port} {transport_port}\n")
         print("PREVIOUS_CUSTOM_PORT_BLOCKS_CROSS_PORT_REKEY=PASS")
         # The port may be occupied by an unrelated listener even though
