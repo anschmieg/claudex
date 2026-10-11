@@ -17,6 +17,7 @@ STATE_ROOT="${CLAUDEX_STATE_HOME:-$HOME/.local/state/claudex}"
 SECRETS_ROOT="$STATE_ROOT/private"
 CLIENT_TOKEN_FILE="$SECRETS_ROOT/client-token"
 TRANSPORT_TOKEN_FILE="$SECRETS_ROOT/transport-token"
+RUNTIME_PORTS_FILE="$SECRETS_ROOT/runtime-ports"
 DATA_ROOT="${CLAUDEX_DATA_HOME:-$HOME/.local/share/claudex}"
 BIN_ROOT="${CLAUDEX_BIN_HOME:-$HOME/.local/bin}"
 AGENTS_DIR="$HOME/.claude/agents"
@@ -143,6 +144,7 @@ loopback_port_accepts_tcp() {
   # modern Linux Bash. Validate port syntax/range in Python instead.
   have python3 || die "Python 3 is required to verify localhost port occupancy safely"
   python3 - "$port" <<'PY'
+import errno
 import socket
 import sys
 value = sys.argv[1]
@@ -154,13 +156,50 @@ if not 1 <= port <= 65535:
 try:
     with socket.create_connection(("127.0.0.1", port), timeout=0.5):
         sys.exit(0)
-except (OSError, TimeoutError):
-    sys.exit(1)
+except OSError as error:
+    # Only an explicit refusal demonstrates a closed listening port.
+    sys.exit(1 if error.errno == errno.ECONNREFUSED else 2)
 PY
 }
 
 local_listener_present() {
-  loopback_port_accepts_tcp "$GATEWAY_PORT" || loopback_port_accepts_tcp "$TRANSPORT_PORT"
+  local port saved_gateway saved_transport probe_status
+  # A missing port record while bearer files exist may mean a previous
+  # runtime used different ports. Never guess which ports are safe.
+  if [[ -f "$CLIENT_TOKEN_FILE" || -f "$TRANSPORT_TOKEN_FILE" ]]; then
+    [[ -f "$RUNTIME_PORTS_FILE" && ! -L "$RUNTIME_PORTS_FILE" ]] || return 0
+  fi
+  if [[ -e "$RUNTIME_PORTS_FILE" || -L "$RUNTIME_PORTS_FILE" ]]; then
+    [[ -f "$RUNTIME_PORTS_FILE" && ! -L "$RUNTIME_PORTS_FILE" ]] || return 0
+    read -r saved_gateway saved_transport < "$RUNTIME_PORTS_FILE" || return 0
+    [[ -n "$saved_gateway" && -n "$saved_transport" ]] || return 0
+  else
+    saved_gateway="$GATEWAY_PORT"
+    saved_transport="$TRANSPORT_PORT"
+  fi
+  for port in "$GATEWAY_PORT" "$TRANSPORT_PORT" "$saved_gateway" "$saved_transport"; do
+    # 0 means occupied; 1 is a confirmed connection refusal; anything else
+    # is indeterminate and must veto destructive credential operations.
+    if loopback_port_accepts_tcp "$port"; then
+      return 0
+    else
+      probe_status=$?
+      [[ "$probe_status" == 1 ]] || return 0
+    fi
+  done
+  return 1
+}
+
+record_runtime_ports() {
+  ensure_dirs
+  [[ ! -L "$SECRETS_ROOT" ]] || die "Refusing symlinked secrets directory"
+  mkdir -p "$SECRETS_ROOT"
+  [[ ! -L "$RUNTIME_PORTS_FILE" ]] || die "Refusing symlinked runtime port record"
+  local tmp
+  tmp="$(mktemp "$SECRETS_ROOT/.ports.XXXXXXXX")" || die "Cannot create runtime port record"
+  printf '%s %s\n' "$GATEWAY_PORT" "$TRANSPORT_PORT" > "$tmp"
+  chmod 600 "$tmp"
+  mv -f "$tmp" "$RUNTIME_PORTS_FILE"
 }
 
 # Two independent per-runtime secrets: Claude Code -> shunt, then shunt ->
@@ -196,6 +235,7 @@ ensure_runtime_tokens() (
   trap 'rmdir "$lock" 2>/dev/null || true' EXIT
 
   if valid_local_token_file "$CLIENT_TOKEN_FILE" && valid_local_token_file "$TRANSPORT_TOKEN_FILE"; then
+    [[ -f "$RUNTIME_PORTS_FILE" && ! -L "$RUNTIME_PORTS_FILE" ]] || die "Missing runtime port provenance; refusing to reuse bearer tokens"
     chmod 600 "$CLIENT_TOKEN_FILE" "$TRANSPORT_TOKEN_FILE"
     return 0
   fi
@@ -205,6 +245,7 @@ ensure_runtime_tokens() (
   if local_listener_present; then
     die "Claudex localhost port is still occupied; refusing to replace missing or invalid runtime credentials"
   fi
+  record_runtime_ports
   for file in "$CLIENT_TOKEN_FILE" "$TRANSPORT_TOKEN_FILE"; do
     [[ ! -L "$file" ]] || die "Refusing symlinked Claudex session token"
     tmp="$(mktemp "$SECRETS_ROOT/.newtoken.XXXXXXXX")" || die "Cannot create private token"
@@ -949,6 +990,9 @@ setup_all() {
   if local_listener_present; then
     die "Claudex localhost port is still occupied; refusing to replace missing or invalid runtime credentials"
   fi
+  # The checked port pair becomes associated with credentials before setup
+  # can create them. Existing listeners on old ports were checked above.
+  record_runtime_ports
   ensure_runtime
   # Validate/generate credentials in the parent shell before any config writes.
   # A failure inside $(client_token) used as an environment assignment below
@@ -1023,6 +1067,7 @@ prepare_fresh_runtime_credentials() {
     # configured port, even if its HTTP health probe returns an error.
     local_listener_present && die "Claudex listener still accepts connections without tracked processes; refusing to rotate active credentials"
     rm -f -- "$CLIENT_TOKEN_FILE" "$TRANSPORT_TOKEN_FILE"
+    record_runtime_ports
   fi
 }
 
