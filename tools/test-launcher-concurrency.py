@@ -123,6 +123,7 @@ echo SYNTHETIC_CLIENT_CONNECTED=PASS
         # on disk but no surviving runtime. New sessions must not reuse them.
         private = state / "private"
         private.mkdir(parents=True)
+        (private / "runtime-ports").write_text(f"{gateway_port} {transport_port}\n")
         orphan_client, orphan_transport = "ab" * 32, "cd" * 32
         for name, value in (("client-token", orphan_client),
                             ("transport-token", orphan_transport)):
@@ -212,6 +213,27 @@ echo SYNTHETIC_CLIENT_CONNECTED=PASS
         print("MISSING_PID_RETAINS_TOKENS_UNTIL_STOPPED=PASS")
         run(app, env, "stop")
         assert not token_file.exists()
+        # A previous daemon may still hold the old bearer after both PID
+        # files vanish, even if the next invocation uses DIFFERENT ports.
+        # Neither rotation nor revocation may disregard persisted ports.
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as old_listener:
+            old_listener.bind(("127.0.0.1", 0))
+            old_listener.listen(16)
+            previous_port = old_listener.getsockname()[1]
+            old_listener.settimeout(0.1)
+            (private / "runtime-ports").write_text(f"{gateway_port} {previous_port}\n")
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as spare:
+                spare.bind(("127.0.0.1", 0))
+                new_port = spare.getsockname()[1]
+            switched_env = {**env, "CLAUDEX_TRANSPORT_PORT": str(new_port)}
+            rejected = run(app, switched_env, "start", success=False)
+            assert "refusing to rotate active credentials" in rejected.stderr
+            rejected_setup = run(app, switched_env, "setup", success=False)
+            assert "port is still occupied" in rejected_setup.stderr
+            assert not token_file.exists()
+            assert not (private / "transport-token").exists()
+        (private / "runtime-ports").write_text(f"{gateway_port} {transport_port}\n")
+        print("PREVIOUS_CUSTOM_PORT_BLOCKS_CROSS_PORT_REKEY=PASS")
         # The port may be occupied by an unrelated listener even though
         # Claudex's prior PID files and both token files are absent. Health
         # probes cannot be relied upon; verify raw TCP occupancy vetoes it.
