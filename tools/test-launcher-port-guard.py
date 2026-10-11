@@ -63,3 +63,17 @@ with tempfile.TemporaryDirectory(prefix="claudex-fast-guard-") as scratch:
                 "active claudex runtime has missing or invalid tokens" in result.stderr.lower()), result.stderr
         assert not (state / "private" / "client-token").exists()
         print("FAST_STALE_PID_OCCUPIED_PORT_SETUP=PASS")
+        # Even if the next invocation uses unrelated ports, the listener
+        # associated with a previous runtime remains a credential veto.
+        (state / "transport.pid").unlink()
+        (state / "private").mkdir(exist_ok=True)
+        (state / "private" / "runtime-ports").write_text(f"{gateway_port} {port}\n")
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as spare:
+            spare.bind(("127.0.0.1", 0))
+            new_port = spare.getsockname()[1]
+        switched = {**env, "CLAUDEX_TRANSPORT_PORT": str(new_port)}
+        result = subprocess.run([str(app), "setup"], env=switched,
+                                cwd=root, capture_output=True, text=True, timeout=12)
+        assert result.returncode != 0, (result.stdout, result.stderr)
+        assert "port" in result.stderr.lower(), result.stderr
+        print("FAST_PREVIOUS_PORT_PROVENANCE=PASS")
