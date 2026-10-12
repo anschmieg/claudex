@@ -3,7 +3,7 @@ set -euo pipefail
 # User-owned credentials and generated settings must not be world-readable.
 umask 077
 
-export PATH="$HOME/.local/bin:/opt/homebrew/bin:/usr/local/bin:$PATH"
+export PATH="$HOME/.npm-global/bin:$HOME/.local/bin:/opt/homebrew/bin:/usr/local/bin:$PATH"
 
 APP="claudex"
 VERSION="0.6.0-dev"
