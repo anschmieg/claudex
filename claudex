@@ -593,8 +593,57 @@ effort: medium
 ---
 Focus on the hard part that justified escalation. Investigate deeply, identify the highest-leverage answer or change, verify it, and avoid expanding scope unnecessarily.
 EOF
+  cat > "$AGENTS_DIR/Explore.md" <<'EOF'
+---
+name: Explore
+description: Fast read-only codebase discovery and targeted search. Use to locate files, symbols, dependencies and evidence; do not edit.
+model: gpt-6-luna[1m]
+---
+Explore narrowly and report evidence, paths, and key findings.
+EOF
+  cat > "$AGENTS_DIR/Plan.md" <<'EOF'
+---
+name: Plan
+description: Design implementation plans, investigate tradeoffs and sequence multi-step engineering work.
+model: gpt-6.1-sol[1m]
+---
+Produce actionable plans grounded in repository evidence.
+EOF
+  cat > "$AGENTS_DIR/research.md" <<'EOF'
+---
+name: research
+description: Fast documentation, API and repository research; gather evidence and references.
+model: gpt-6-luna[1m]
+---
+Find facts and cite paths or sources. Escalate when reasoning becomes complex.
+EOF
+  cat > "$AGENTS_DIR/implement.md" <<'EOF'
+---
+name: implement
+description: Implement nontrivial changes and debug across modules with focused tests.
+model: gpt-6.1-sol[1m]
+---
+Make the required changes, test them and summarize the evidence.
+EOF
+  cat > "$AGENTS_DIR/review.md" <<'EOF'
+---
+name: review
+description: Review code correctness, security boundaries, tests and regression risks.
+model: gpt-6.1-sol[1m]
+---
+Focus on actionable findings and reproduce failures where feasible.
+EOF
+  cat > "$AGENTS_DIR/architect.md" <<'EOF'
+---
+name: architect
+description: Escalation for difficult architecture, security analysis and unresolved root causes.
+model: gpt-6-astra[1m]
+---
+Investigate deeply, challenge assumptions and report verifiable conclusions.
+EOF
+  # General-purpose remains unpinned so it inherits its coordinator model.
   local generated agent destination reference
-  for generated in "$agent_staging"/gpt-*.md; do
+  for generated in "$agent_staging"/*.md; do
     [[ -f "$generated" ]] || continue
     agent="$(basename "$generated")"
     destination="$user_agents_dir/$agent"
