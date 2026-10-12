@@ -162,24 +162,54 @@ except OSError as error:
 PY
 }
 
+valid_runtime_port() {
+  local port="$1"
+  case "$port" in
+    ""|*[!0-9]*|??????*) return 1 ;;
+  esac
+  (( 10#$port >= 1 && 10#$port <= 65535 ))
+}
+
+# The port record belongs to the bearer generation that created it.
+# Malformed provenance must never be overwritten or treated as proof of safety.
+read_recorded_runtime_ports() {
+  local record extra
+  RECORDED_GATEWAY_PORT=""
+  RECORDED_TRANSPORT_PORT=""
+  [[ -f "$RUNTIME_PORTS_FILE" && ! -L "$RUNTIME_PORTS_FILE" ]] || return 1
+  record="$(cat "$RUNTIME_PORTS_FILE")" || return 1
+  read -r RECORDED_GATEWAY_PORT RECORDED_TRANSPORT_PORT extra <<< "$record" || return 1
+  [[ "$record" == "$RECORDED_GATEWAY_PORT $RECORDED_TRANSPORT_PORT" ]] &&
+    valid_runtime_port "$RECORDED_GATEWAY_PORT" &&
+    valid_runtime_port "$RECORDED_TRANSPORT_PORT"
+}
+
+assert_recorded_ports_match() {
+  read_recorded_runtime_ports ||
+    die "Missing or invalid runtime port provenance; refusing to reuse active credentials"
+  if [[ "$RECORDED_GATEWAY_PORT" != "$GATEWAY_PORT" ||
+        "$RECORDED_TRANSPORT_PORT" != "$TRANSPORT_PORT" ]]; then
+    die "Runtime ports differ from the active credential generation; safely stop the prior runtime before changing ports"
+  fi
+}
+
 local_listener_present() {
   local port saved_gateway saved_transport probe_status
-  # A missing port record while bearer files exist may mean a previous
-  # runtime used different ports. Never guess which ports are safe.
-  if [[ -f "$CLIENT_TOKEN_FILE" || -f "$TRANSPORT_TOKEN_FILE" ]]; then
-    [[ -f "$RUNTIME_PORTS_FILE" && ! -L "$RUNTIME_PORTS_FILE" ]] || return 0
-  fi
+  # Missing/corrupt provenance while tokens exist means we cannot know which
+  # former ports to probe. Treat uncertainty as an occupied listener.
   if [[ -e "$RUNTIME_PORTS_FILE" || -L "$RUNTIME_PORTS_FILE" ]]; then
-    [[ -f "$RUNTIME_PORTS_FILE" && ! -L "$RUNTIME_PORTS_FILE" ]] || return 0
-    read -r saved_gateway saved_transport < "$RUNTIME_PORTS_FILE" || return 0
-    [[ -n "$saved_gateway" && -n "$saved_transport" ]] || return 0
+    read_recorded_runtime_ports || return 0
+    saved_gateway="$RECORDED_GATEWAY_PORT"
+    saved_transport="$RECORDED_TRANSPORT_PORT"
+  elif [[ -e "$CLIENT_TOKEN_FILE" || -L "$CLIENT_TOKEN_FILE" ||
+          -e "$TRANSPORT_TOKEN_FILE" || -L "$TRANSPORT_TOKEN_FILE" ]]; then
+    return 0
   else
     saved_gateway="$GATEWAY_PORT"
     saved_transport="$TRANSPORT_PORT"
   fi
   for port in "$GATEWAY_PORT" "$TRANSPORT_PORT" "$saved_gateway" "$saved_transport"; do
-    # 0 means occupied; 1 is a confirmed connection refusal; anything else
-    # is indeterminate and must veto destructive credential operations.
+    # 0 = occupied; 1 = connection refused; anything else = indeterminate.
     if loopback_port_accepts_tcp "$port"; then
       return 0
     else
@@ -194,7 +224,32 @@ record_runtime_ports() {
   ensure_dirs
   [[ ! -L "$SECRETS_ROOT" ]] || die "Refusing symlinked secrets directory"
   mkdir -p "$SECRETS_ROOT"
-  [[ ! -L "$RUNTIME_PORTS_FILE" ]] || die "Refusing symlinked runtime port record"
+  chmod 700 "$SECRETS_ROOT"
+  valid_runtime_port "$GATEWAY_PORT" && valid_runtime_port "$TRANSPORT_PORT" ||
+    die "Invalid Claudex port; refusing to change runtime port provenance"
+
+  if [[ -e "$RUNTIME_PORTS_FILE" || -L "$RUNTIME_PORTS_FILE" ]]; then
+    read_recorded_runtime_ports ||
+      die "Invalid runtime port provenance; refusing to overwrite unknown former ports"
+    if [[ "$RECORDED_GATEWAY_PORT" == "$GATEWAY_PORT" &&
+          "$RECORDED_TRANSPORT_PORT" == "$TRANSPORT_PORT" ]]; then
+      return 0
+    fi
+  fi
+
+  # A live but temporarily non-listening daemon can retain bearer secrets.
+  # Neither connection refusal nor a reused PID authorizes overwriting the
+  # record while any credentials or PID files remain.
+  if [[ -e "$CLIENT_TOKEN_FILE" || -L "$CLIENT_TOKEN_FILE" ||
+        -e "$TRANSPORT_TOKEN_FILE" || -L "$TRANSPORT_TOKEN_FILE" ||
+        -e "$SHUNT_PID" || -L "$SHUNT_PID" ||
+        -e "$TRANSPORT_PID" || -L "$TRANSPORT_PID" ]]; then
+    die "Refusing to change runtime ports while credentials or daemon PID files remain; stop the prior runtime safely first"
+  fi
+
+  local_listener_present &&
+    die "Claudex localhost listener is still occupied; refusing to change runtime port provenance"
+
   local tmp
   tmp="$(mktemp "$SECRETS_ROOT/.ports.XXXXXXXX")" || die "Cannot create runtime port record"
   printf '%s %s\n' "$GATEWAY_PORT" "$TRANSPORT_PORT" > "$tmp"
@@ -235,7 +290,7 @@ ensure_runtime_tokens() (
   trap 'rmdir "$lock" 2>/dev/null || true' EXIT
 
   if valid_local_token_file "$CLIENT_TOKEN_FILE" && valid_local_token_file "$TRANSPORT_TOKEN_FILE"; then
-    [[ -f "$RUNTIME_PORTS_FILE" && ! -L "$RUNTIME_PORTS_FILE" ]] || die "Missing runtime port provenance; refusing to reuse bearer tokens"
+    assert_recorded_ports_match
     chmod 600 "$CLIENT_TOKEN_FILE" "$TRANSPORT_TOKEN_FILE"
     return 0
   fi
@@ -740,6 +795,12 @@ stop_one() {
 
 stop_runtime() {
   local quiet="${1:-0}" failed=0
+  # Revocation must refer to the same ports that received these credentials,
+  # even when the former daemon is not currently accepting connections.
+  if [[ -e "$CLIENT_TOKEN_FILE" || -L "$CLIENT_TOKEN_FILE" ||
+        -e "$TRANSPORT_TOKEN_FILE" || -L "$TRANSPORT_TOKEN_FILE" ]]; then
+    assert_recorded_ports_match
+  fi
   stop_one "$SHUNT_PID" "Claudex translator" "$SHUNT_BIN" "$quiet" || failed=1
   stop_one "$TRANSPORT_PID" "Claudex Codex transport" "$TRANSPORT_BIN" "$quiet" || failed=1
   # Missing PID files are NOT evidence of shutdown. An untracked but live
@@ -1066,8 +1127,18 @@ prepare_fresh_runtime_credentials() {
     # closed if any process is still accepting TCP connections on either
     # configured port, even if its HTTP health probe returns an error.
     local_listener_present && die "Claudex listener still accepts connections without tracked processes; refusing to rotate active credentials"
+    # If old tokens survived but their ports differ, the absent PID files do
+    # not justify rotation: an orphan could resume accepting connections.
+    if [[ -e "$CLIENT_TOKEN_FILE" || -L "$CLIENT_TOKEN_FILE" ||
+          -e "$TRANSPORT_TOKEN_FILE" || -L "$TRANSPORT_TOKEN_FILE" ]]; then
+      assert_recorded_ports_match
+    fi
     rm -f -- "$CLIENT_TOKEN_FILE" "$TRANSPORT_TOKEN_FILE"
     record_runtime_ports
+  else
+    # Live tracked processes may temporarily stop accepting connections.
+    # Never reuse their credentials against a different port configuration.
+    assert_recorded_ports_match
   fi
 }
 
@@ -1362,7 +1433,7 @@ case "$cmd" in
     claude --version
     ;;
   version|--claudex-version) echo "Claudex $VERSION" ;;
-  setup) setup_all ;;
+  setup) with_runtime_lock setup_all ;;
   login) login_chatgpt ;;
   auth-status) auth_status ;;
   logout) with_runtime_lock logout_chatgpt ;;
