@@ -1383,6 +1383,36 @@ smoke_claude() {
   note "Full Claude Code harness smoke test passed."
 }
 
+merge_claude_sdk_settings() {
+  local base="$1" caller="$2" destination="$3"
+  node - "$base" "$caller" "$destination" <<'NODE'
+const fs = require('fs');
+const [basePath, incoming, outputPath] = process.argv.slice(2);
+const base = JSON.parse(fs.readFileSync(basePath, 'utf8'));
+let extra;
+try { extra = JSON.parse(incoming); }
+catch { extra = JSON.parse(fs.readFileSync(incoming, 'utf8')); }
+if (!extra || typeof extra !== 'object' || Array.isArray(extra)) {
+  throw new Error('Claudex: caller --settings must be a JSON object');
+}
+const allowedBooleanSettings = new Set([
+  'disableAllHooks', 'showThinkingSummaries', 'alwaysThinkingEnabled',
+  'fastMode', 'ultracode',
+]);
+for (const [key, value] of Object.entries(extra)) {
+  if (key === 'autoCompactWindow') {
+    if (!Number.isSafeInteger(value) || value < 10000 || value > 2000000) {
+      throw new Error('Claudex: invalid SDK autoCompactWindow setting');
+    }
+  } else if (!allowedBooleanSettings.has(key) || typeof value !== 'boolean' ||
+             (key === 'disableAllHooks' && value !== true)) {
+    throw new Error('Claudex: disallowed SDK setting ' + key);
+  }
+}
+fs.writeFileSync(outputPath, JSON.stringify({...base, ...extra}), {mode: 0o600});
+NODE
+}
+
 launch() {
   local coordinator="${1:-sol}" settings claude_rc=0
   local -a fast_args=()
@@ -1398,7 +1428,7 @@ launch() {
 
   LAUNCH_LEASE="$SESSION_DIR/$$"
   with_runtime_lock launch_prepare
-  trap 'launch_cleanup' EXIT
+  trap '[[ -z "${CLAUDEX_MERGED_SETTINGS_FILE:-}" ]] || rm -f -- "$CLAUDEX_MERGED_SETTINGS_FILE"; launch_cleanup' EXIT
   trap 'exit 129' HUP
   trap 'exit 130' INT
   trap 'exit 143' TERM
@@ -1416,9 +1446,32 @@ launch() {
   export CLAUDE_CODE_AUTO_COMPACT_WINDOW="272000"
   export CLAUDE_CODE_ENABLE_FINE_GRAINED_TOOL_STREAMING=1
 
+  # The Claude Agent SDK (T3 Code) passes --settings as JSON for hook isolation.
+  # Merge it with our transport settings, never replacing our protected keys.
+  local -a forwarded_args=()
+  local caller_settings="" seen_caller_settings=0
+  while [[ "$#" -gt 0 ]]; do
+    case "$1" in
+      --settings)
+        [[ "$#" -ge 2 && "$seen_caller_settings" == 0 ]] || die "Invalid repeated or missing --settings argument"
+        caller_settings="$2"; seen_caller_settings=1; shift 2 ;;
+      --settings=*)
+        [[ "$seen_caller_settings" == 0 ]] || die "Repeated --settings argument"
+        caller_settings="${1#--settings=}"; seen_caller_settings=1; shift ;;
+      *) forwarded_args+=("$1"); shift ;;
+    esac
+  done
+  if [[ "$seen_caller_settings" == 1 ]]; then
+    [[ -n "$caller_settings" ]] || die "Empty --settings argument"
+    CLAUDEX_MERGED_SETTINGS_FILE="$(mktemp "$STATE_ROOT/claude-settings-sdk.XXXXXX")" || die "Cannot create merged settings"
+    chmod 600 "$CLAUDEX_MERGED_SETTINGS_FILE"
+    merge_claude_sdk_settings "$settings" "$caller_settings" "$CLAUDEX_MERGED_SETTINGS_FILE" || die "Cannot merge Claude SDK settings"
+    settings="$CLAUDEX_MERGED_SETTINGS_FILE"
+  fi
+
   # Do not exec: we need to tear down an ephemeral runtime after Claude exits.
   set +e
-  claude ${fast_args[@]+"${fast_args[@]}"} --settings "$settings" --model "$selected_model" "$@"
+  claude ${fast_args[@]+"${fast_args[@]}"} --settings "$settings" --model "$selected_model" "${forwarded_args[@]}"
   claude_rc=$?
   set -e
   # EXIT trap unregisters this launcher; it must not stop other sessions.
