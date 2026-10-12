@@ -22,7 +22,7 @@ Always review the current terms before real-world deployment.
 
 ## Technical gaps to resolve before deployment
 
-- **Same-user bearer theft:** owner-only token files are not a boundary against malicious code running as that same OS user. The current two-hop bearer protocol tests request authentication and cleanup but does not bind permissions to a verified calling application. Design an app-bound IPC broker or comparable OS-enforced identity boundary.
+- **Same-user bearer theft:** owner-only token files are not a boundary against malicious code running as that same OS user. The current two-hop bearer protocol tests request authentication and cleanup but does not bind permissions to a verified calling application. Design an app-bound IPC broker or comparable OS-enforced identity boundary. The fail-closed TCP listener probe prevents some unsafe crash-recovery rekeys, but does not establish app identity or satisfy this requirement. See [AUTH_BOUNDARY.md](AUTH_BOUNDARY.md).
 - **API compatibility versus application scope:** Claude Code and T3 Code are separate software. A generic HTTP adapter does not mean they are automatically covered by the connected application's SIWC permission.
 - **OAuth and refresh:** native Linux Secret Service and macOS Keychain tests used synthetic credentials. A real-account login/refresh/disconnect cycle has not been validated across public targets and should be tested only within a permitted connected application.
 - **Hosted tool and model limits:** provider policies decide access; CLI flags cannot grant unlimited inference, hosted tools or features the plan does not support.

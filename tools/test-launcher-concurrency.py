@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Native four-platform Claudex session smoke; synthetic auth, zero inference."""
-import os, platform, socket, subprocess, sys, tempfile, time, urllib.request, urllib.error
+import os, platform, socket, subprocess, sys, tempfile, time, threading, urllib.request, urllib.error
 from pathlib import Path
 
 root = Path(__file__).resolve().parent.parent
@@ -123,6 +123,7 @@ echo SYNTHETIC_CLIENT_CONNECTED=PASS
         # on disk but no surviving runtime. New sessions must not reuse them.
         private = state / "private"
         private.mkdir(parents=True)
+        (private / "runtime-ports").write_text(f"{gateway_port} {transport_port}\n")
         orphan_client, orphan_transport = "ab" * 32, "cd" * 32
         for name, value in (("client-token", orphan_client),
                             ("transport-token", orphan_transport)):
@@ -165,6 +166,34 @@ echo SYNTHETIC_CLIENT_CONNECTED=PASS
         third, _ = launch("persistent", released=True)
         assert third.wait(timeout=20) == 0
         assert token_file.exists()
+        # Both daemon PID files can disappear independently of their live
+        # TCP listeners (crash, disk loss or another process interfering).
+        # A new launch must NEVER replace the still-active bearer secrets.
+        before_client = token_file.read_text()
+        before_transport = (private / "transport-token").read_text()
+        withheld_pids = []
+        for name in ("shunt.pid", "transport.pid"):
+            original = state / name
+            withheld = state / (name + ".synthetic-withheld")
+            assert original.is_file()
+            original.rename(withheld)
+            withheld_pids.append((original, withheld))
+        try:
+            rejected = run(app, env, "start", success=False)
+            assert "refusing to rotate active credentials" in rejected.stderr
+            assert token_file.read_text() == before_client
+            assert (private / "transport-token").read_text() == before_transport
+            assert status(gateway_port, before_client) == 200
+            rejected_stop = run(app, env, "stop", success=False)
+            assert "still bound" in rejected_stop.stderr
+            assert token_file.read_text() == before_client
+            assert (private / "transport-token").read_text() == before_transport
+        finally:
+            for original, withheld in withheld_pids:
+                if withheld.is_file():
+                    withheld.rename(original)
+        print("BOTH_PIDS_LOST_LIVE_LISTENERS_BLOCK_REKEY_AND_REVOCATION=PASS")
+
         # An unexpected disappearance of a PID file must not make stop()
         # falsely revoke local credentials while transport is still serving.
         transport_pid_path = state / "transport.pid"
@@ -184,6 +213,72 @@ echo SYNTHETIC_CLIENT_CONNECTED=PASS
         print("MISSING_PID_RETAINS_TOKENS_UNTIL_STOPPED=PASS")
         run(app, env, "stop")
         assert not token_file.exists()
+        # A previous daemon may still hold the old bearer after both PID
+        # files vanish, even if the next invocation uses DIFFERENT ports.
+        # Neither rotation nor revocation may disregard persisted ports.
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as old_listener:
+            old_listener.bind(("127.0.0.1", 0))
+            old_listener.listen(16)
+            previous_port = old_listener.getsockname()[1]
+            old_listener.settimeout(0.1)
+            (private / "runtime-ports").write_text(f"{gateway_port} {previous_port}\n")
+            stale_client, stale_transport = "ef" * 32, "ab" * 32
+            token_file.write_text(stale_client)
+            (private / "transport-token").write_text(stale_transport)
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as spare:
+                spare.bind(("127.0.0.1", 0))
+                new_port = spare.getsockname()[1]
+            switched_env = {**env, "CLAUDEX_TRANSPORT_PORT": str(new_port)}
+            rejected = run(app, switched_env, "start", success=False)
+            assert "refusing to rotate active credentials" in rejected.stderr
+            rejected_setup = run(app, switched_env, "setup", success=False)
+            assert "port is still occupied" in rejected_setup.stderr
+            assert token_file.read_text() == stale_client
+            assert (private / "transport-token").read_text() == stale_transport
+        token_file.unlink()
+        (private / "transport-token").unlink()
+        (private / "runtime-ports").write_text(f"{gateway_port} {transport_port}\n")
+        print("PREVIOUS_CUSTOM_PORT_BLOCKS_CROSS_PORT_REKEY=PASS")
+        # The port may be occupied by an unrelated listener even though
+        # Claudex's prior PID files and both token files are absent. Health
+        # probes cannot be relied upon; verify raw TCP occupancy vetoes it.
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as occupied:
+            occupied.bind(("127.0.0.1", 0))
+            occupied.listen(16)
+            fake_port = occupied.getsockname()[1]
+            blocked_env = {**env, "CLAUDEX_TRANSPORT_PORT": str(fake_port)}
+            # Drain probe connections. A listen(1) socket that never accepts
+            # accumulates completed connects; on macOS the backlog saturates
+            # after start probes and makes the following setup probe appear
+            # to see a closed port even though the listener is still bound.
+            occupied.settimeout(0.1)
+            serving = threading.Event()
+            serving.set()
+            def drain_probe_connections():
+                while serving.is_set():
+                    try:
+                        conn, _ = occupied.accept()
+                    except socket.timeout:
+                        continue
+                    except OSError:
+                        break
+                    conn.close()
+            acceptor = threading.Thread(target=drain_probe_connections, daemon=True)
+            acceptor.start()
+            try:
+                denied = run(app, blocked_env, "start", success=False)
+                assert "still accepts connections" in denied.stderr
+                assert not token_file.exists()
+                assert not (private / "transport-token").exists()
+                # Setup must independently reject the still-accepting port.
+                denied_setup = run(app, blocked_env, "setup", success=False)
+                assert "refusing to replace missing or invalid runtime credentials" in denied_setup.stderr
+                assert not token_file.exists()
+                assert not (private / "transport-token").exists()
+            finally:
+                serving.clear()
+                acceptor.join(timeout=2)
+        print("UNRELATED_TCP_LISTENER_BLOCKS_FRESH_TOKEN_GENERATION=PASS")
         print(f"NATIVE_LAUNCHER_SMOKE=PASS target={target} model_requests=0")
     finally:
         for release in releases:

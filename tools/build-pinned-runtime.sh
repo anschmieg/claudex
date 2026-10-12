@@ -23,8 +23,14 @@ esac
   echo "Pinned revisions must be exact commit SHA-1s" >&2
   exit 2
 }
-# Refuse to overwrite a previously used worktree; no implicit reset/clean.
-[[ ! -e "$WORK" ]] || { echo "Build workdir already exists; choose a fresh CLAUDEX_BUILD_WORKDIR" >&2; exit 2; }
+# Allow only the Cargo compilation cache restored by CI. Never reuse
+# checked-out upstream trees: each run must fetch and verify exact commits.
+if [[ -e "$WORK" ]]; then
+  [[ -d "$WORK" && ! -e "$WORK/shunt" && ! -e "$WORK/codex" && ! -e "$WORK/target-shunt" ]] || {
+    echo "Build workdir contains a prior source checkout; choose a fresh CLAUDEX_BUILD_WORKDIR" >&2
+    exit 2
+  }
+fi
 mkdir -p "$WORK"
 echo "Building $target from pinned source in $WORK"
 

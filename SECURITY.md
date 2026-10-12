@@ -4,7 +4,7 @@ This is an experimental source repository, **not a security-audited release**. D
 
 ## Current security limitations
 
-The launcher binds local interfaces to loopback and authenticates both hops with random bearer values, but the bearer values are stored in owner-only files. This does not prevent another process running under the *same* operating-system user from obtaining them. A future broker or equivalent application-bound authorization boundary is required before broad release.
+The launcher binds local interfaces to loopback and authenticates both hops with random bearer values, but the bearer values are stored in owner-only files. This does not prevent another process running under the *same* operating-system user from obtaining them. A future broker or equivalent application-bound authorization boundary is required before broad release. The experimental lifecycle now fails closed when either loopback TCP port is occupied but both managed PID files are absent. This protects against false token rotation/revocation after partial daemon failure; it does not identify or restrict hostile same-user processes. See docs/AUTH_BOUNDARY.md.
 
 The source runtime is not signed or notarized. Authentication against real user accounts, actual Linux keyring behavior in desktop sessions, token refresh under service outages, and permission boundaries have not been comprehensively independently audited. Synthetic tests use disposable profiles and fake tokens.
 

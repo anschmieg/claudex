@@ -16,7 +16,7 @@ python3 tools/test-local-auth.py
 PYTHONDONTWRITEBYTECODE=1 python3 tools/test-launcher-concurrency.py
 ~~~
 
-The native build script fetches the pinned upstream sources, applies the reviewed Shunt patch, compiles the Rust transport from this repository, runs Rust translation/authentication tests and audits binary source paths. Binaries are written under ignored bin/; inspect them locally, but do not upload or redistribute them as releases without proper provenance, licensing and signing reviews.
+The native build script fetches the pinned upstream sources, applies the reviewed Shunt patch, compiles the Rust transport from this repository, runs Rust translation/authentication tests and audits binary source paths. The synthetic launcher suite also verifies that losing both daemon PID files or occupying a port with an unrelated TCP listener cannot cause live token rotation or a false claim of revocation. Binaries are written under ignored bin/; inspect them locally, but do not upload or redistribute them as releases without proper provenance, licensing and signing reviews.
 
 ## Credential adapter tests: no official DevKit needed
 
