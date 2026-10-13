@@ -29,6 +29,7 @@ SIWC_MARKER="$CFG_ROOT/native-siwc-enabled"
 SHUNT_CFG="$CFG_ROOT/shunt.toml"
 SHUNT_PATCH="$DATA_ROOT/patches/claudex-shunt.patch"
 REASONING_HELPER="${CLAUDEX_REASONING_HELPER:-$DATA_ROOT/codex-reasoning-defaults.py}"
+GPT_OVERLAY_FILE="${CLAUDEX_GPT_OVERLAY_FILE:-$DATA_ROOT/prompts/gpt-execution-overlay.md}"
 TRANSPORT_SRC_DIR="$DATA_ROOT/transport-source"
 
 CLAUDE_SETTINGS_SOL="$CFG_ROOT/claude-settings-sol.json"
@@ -1492,10 +1493,57 @@ launch() {
     esac
   fi
 
+  # Load our small, separately versioned GPT overlay at *session startup*.
+  # Preserve a caller/SDK append prompt by combining it with ours once: some
+  # Claude Code versions treat repeated --append-system-prompt as last-wins.
+  # This keeps upstream Claude Code's original system prompt entirely intact.
+  local -a merged_cli_args=() append_prompt_args=()
+  local incoming_append="" accumulated_append="" append_file=""
+  for (( index=0; index < ${#forwarded_args[@]}; index++ )); do
+    case "${forwarded_args[$index]}" in
+      --append-system-prompt|--append-system-prompt-file)
+        (( index + 1 < ${#forwarded_args[@]} )) || die "Missing --append-system-prompt value"
+        incoming_append="${forwarded_args[$((index + 1))]}"
+        if [[ "${forwarded_args[$index]}" == --append-system-prompt-file ]]; then
+          [[ -f "$incoming_append" && -r "$incoming_append" ]] \
+            || die "Cannot read caller-provided system prompt file"
+          incoming_append="$(cat -- "$incoming_append")"
+        fi
+        index=$((index + 1)) ;;
+      --append-system-prompt=*) incoming_append="${forwarded_args[$index]#--append-system-prompt=}" ;;
+      --append-system-prompt-file=*)
+        append_file="${forwarded_args[$index]#--append-system-prompt-file=}"
+        [[ -f "$append_file" && -r "$append_file" ]] || die "Cannot read caller-provided system prompt file"
+        incoming_append="$(cat -- "$append_file")" ;;
+      *) merged_cli_args+=("${forwarded_args[$index]}"); continue ;;
+    esac
+    if [[ -n "$incoming_append" ]]; then
+      [[ -z "$accumulated_append" ]] || accumulated_append+=$'\n\n'
+      accumulated_append+="$incoming_append"
+    fi
+    incoming_append=""
+  done
+  if [[ "${CLAUDEX_GPT_OVERLAY:-0}" == 1 ]]; then
+    if [[ -L "$GPT_OVERLAY_FILE" ]]; then
+      die "Refusing symlinked GPT overlay: $GPT_OVERLAY_FILE"
+    elif [[ -r "$GPT_OVERLAY_FILE" && -f "$GPT_OVERLAY_FILE" ]]; then
+      local overlay_text
+      overlay_text="$(cat -- "$GPT_OVERLAY_FILE")"
+      if [[ -n "$overlay_text" ]]; then
+        [[ -z "$accumulated_append" ]] || accumulated_append+=$'\n\n'
+        accumulated_append+="$overlay_text"
+      fi
+    fi
+  fi
+  if [[ -n "$accumulated_append" ]]; then
+    append_prompt_args=(--append-system-prompt "$accumulated_append")
+  fi
+
   # Do not exec: we need to tear down an ephemeral runtime after Claude exits.
   set +e
   claude ${fast_args[@]+"${fast_args[@]}"} --settings "$settings" --model "$selected_model" \
-    ${default_effort_args[@]+"${default_effort_args[@]}"} "${forwarded_args[@]}"
+    ${default_effort_args[@]+"${default_effort_args[@]}"} \
+    ${append_prompt_args[@]+"${append_prompt_args[@]}"} ${merged_cli_args[@]+"${merged_cli_args[@]}"}
   claude_rc=$?
   set -e
   # EXIT trap unregisters this launcher; it must not stop other sessions.

@@ -9,13 +9,15 @@ STATE_ROOT="${CLAUDEX_STATE_HOME:-$HOME/.local/state/claudex}"
 CFG_ROOT="${CLAUDEX_CONFIG_HOME:-$HOME/.config/claudex}"
 SIWC_PROFILE_DIR="${CLAUDEX_SIWC_DIR:-$HOME/.config/claudex/chatgpt}"
 NO_SETUP=0
+PRESERVE_WRAPPER=0
 
-if [[ "${1:-}" == "--no-setup" ]]; then
-  NO_SETUP=1
-elif [[ -n "${1:-}" ]]; then
-  echo "Usage: ./install.sh [--no-setup]" >&2
-  exit 2
-fi
+for option in "$@"; do
+  case "$option" in
+    --no-setup) NO_SETUP=1 ;;
+    --preserve-wrapper) PRESERVE_WRAPPER=1 ;;
+    *) echo "Usage: ./install.sh [--no-setup] [--preserve-wrapper]" >&2; exit 2 ;;
+  esac
+done
 
 # Do not overwrite executable images mapped by an active local Claudex
 # runtime. On macOS, lsof is available for an inexpensive listener check.
@@ -64,12 +66,19 @@ if [[ -L "$CFG_ROOT/native-siwc-enabled" ]]; then
   exit 5
 fi
 
+# The prompts directory is owned by the installer, not a symlink target.
+if [[ -L "$DATA_ROOT/prompts" ]]; then
+  echo "Refusing symlinked Claudex prompts directory: $DATA_ROOT/prompts" >&2
+  exit 5
+fi
+
 # Protect all individual installer-owned destinations against symlink
 # redirection before performing ANY writes. Directory symlinks may be user-
 # managed (e.g. with chezmoi), but installer-owned files cannot be symlinks.
 for managed_target in \
   "$DATA_ROOT/launcher" "$DATA_ROOT/shunt" "$DATA_ROOT/claudex-transport" \
-  "$DATA_ROOT/claudex-siwc.mjs" "$DATA_ROOT/codex-reasoning-defaults.py" "$DATA_ROOT/installed-wrapper-reference" \
+  "$DATA_ROOT/claudex-siwc.mjs" "$DATA_ROOT/codex-reasoning-defaults.py" \
+  "$DATA_ROOT/prompts/gpt-execution-overlay.md" "$DATA_ROOT/installed-wrapper-reference" \
   "$DATA_ROOT/installer-owned-wrapper" \
   "$DATA_ROOT/patches/claudex-shunt.patch" \
   "$DATA_ROOT/transport-source/Cargo.toml" "$DATA_ROOT/transport-source/main.rs" \
@@ -83,7 +92,12 @@ done
 # it and the current bytes still match its last recorded reference.
 # This check precedes ALL package writes (including mkdir).
 installer_created_wrapper=0
-if [[ -e "$BIN_ROOT/claudex" || -L "$BIN_ROOT/claudex" ]]; then
+if [[ "$PRESERVE_WRAPPER" == 1 ]]; then
+  [[ -x "$BIN_ROOT/claudex" && ! -L "$BIN_ROOT/claudex" ]] || {
+    echo "--preserve-wrapper requires an existing regular executable: $BIN_ROOT/claudex" >&2
+    exit 5
+  }
+elif [[ -e "$BIN_ROOT/claudex" || -L "$BIN_ROOT/claudex" ]]; then
   if [[ -L "$BIN_ROOT/claudex" ]] || [[ ! -f "$DATA_ROOT/installer-owned-wrapper" ]] \
       || [[ ! -f "$DATA_ROOT/installed-wrapper-reference" ]] \
       || ! cmp -s "$BIN_ROOT/claudex" "$DATA_ROOT/installed-wrapper-reference"; then
@@ -97,10 +111,14 @@ fi
 mkdir -p "$BIN_ROOT" "$DATA_ROOT/patches" "$DATA_ROOT/transport-source" "$STATE_ROOT"
 install -m 0755 "$SCRIPT_DIR/claudex" "$DATA_ROOT/launcher"
 install -m 0755 "$SCRIPT_DIR/tools/codex-reasoning-defaults.py" "$DATA_ROOT/codex-reasoning-defaults.py"
-install -m 0755 "$SCRIPT_DIR/wrapper/claudex" "$BIN_ROOT/claudex"
-install -m 0644 "$SCRIPT_DIR/wrapper/claudex" "$DATA_ROOT/installed-wrapper-reference"
-if [[ "$installer_created_wrapper" == 1 ]]; then
-  : > "$DATA_ROOT/installer-owned-wrapper"
+install -d -m 0755 "$DATA_ROOT/prompts"
+install -m 0644 "$SCRIPT_DIR/prompts/gpt-execution-overlay.md" "$DATA_ROOT/prompts/gpt-execution-overlay.md"
+if [[ "$PRESERVE_WRAPPER" == 0 ]]; then
+  install -m 0755 "$SCRIPT_DIR/wrapper/claudex" "$BIN_ROOT/claudex"
+  install -m 0644 "$SCRIPT_DIR/wrapper/claudex" "$DATA_ROOT/installed-wrapper-reference"
+  if [[ "$installer_created_wrapper" == 1 ]]; then
+    : > "$DATA_ROOT/installer-owned-wrapper"
+  fi
 fi
 install -m 0644 "$SCRIPT_DIR/patches/claudex-shunt.patch" "$DATA_ROOT/patches/claudex-shunt.patch"
 install -m 0644 "$SCRIPT_DIR/transport-source/Cargo.toml" "$DATA_ROOT/transport-source/Cargo.toml"
@@ -108,7 +126,18 @@ install -m 0644 "$SCRIPT_DIR/transport-source/main.rs" "$DATA_ROOT/transport-sou
 
 install -m 0755 "$SCRIPT_DIR/bin/$target_dir/shunt" "$DATA_ROOT/shunt"
 install -m 0755 "$SCRIPT_DIR/bin/$target_dir/claudex-transport" "$DATA_ROOT/claudex-transport"
-install -m 0755 "$SCRIPT_DIR/auth/claudex-siwc.mjs" "$DATA_ROOT/claudex-siwc.mjs"
+# The public source checkout excludes the licensed SIWC helper and contains
+# an inert 38-byte placeholder. Never overwrite a separately installed,
+# authorized helper with this placeholder during a source-only upgrade.
+if grep -Fxq 'process.exit(99);' "$SCRIPT_DIR/auth/claudex-siwc.mjs"; then
+  if [[ -x "$DATA_ROOT/claudex-siwc.mjs" ]] && ! grep -Fxq 'process.exit(99);' "$DATA_ROOT/claudex-siwc.mjs"; then
+    echo 'Preserved existing optional Sign in with ChatGPT helper.'
+  else
+    echo 'Optional Sign in with ChatGPT helper not included in source-only package.'
+  fi
+else
+  install -m 0755 "$SCRIPT_DIR/auth/claudex-siwc.mjs" "$DATA_ROOT/claudex-siwc.mjs"
+fi
 # Restore the native SIWC preference only when the OS-backed key store is
 # supported. Do not copy, decrypt or regenerate the existing profile or key.
 # Linux reinstallations must also preserve Secret Service profile selection.
@@ -117,7 +146,7 @@ case "$platform" in
   Darwin-*) can_reuse_siwc=1 ;;
   Linux-*) command -v secret-tool >/dev/null 2>&1 && can_reuse_siwc=1 ;;
 esac
-if [[ "$can_reuse_siwc" == 1 && -s "$SIWC_PROFILE_DIR/chatgpt-auth.json" ]]; then
+if [[ "$can_reuse_siwc" == 1 && -x "$DATA_ROOT/claudex-siwc.mjs" ]] && ! grep -Fxq 'process.exit(99);' "$DATA_ROOT/claudex-siwc.mjs" && [[ -s "$SIWC_PROFILE_DIR/chatgpt-auth.json" ]]; then
   mkdir -p "$CFG_ROOT"
   : > "$CFG_ROOT/native-siwc-enabled"
   chmod 600 "$CFG_ROOT/native-siwc-enabled"

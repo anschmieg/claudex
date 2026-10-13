@@ -56,7 +56,9 @@ to synchronize the *default reasoning options* of existing Claudex custom models
 in `~/.t3/userdata/settings.json`. The sync makes a private backup, preserves other
 provider settings and existing model selections, and requires a T3 provider refresh
 for a running service. Set `CLAUDEX_USE_CODEX_DEFAULT_EFFORT=0` to disable implicit
-CLI injection temporarily. See [GPT harness alignment](docs/GPT_HARNESS_ALIGNMENT.md)
+CLI injection temporarily. A candidate GPT-specific appended instruction file exists as an
+**opt-in experiment** at `prompts/gpt-execution-overlay.md` (`CLAUDEX_GPT_OVERLAY=1`).
+It is disabled by default pending selective prompt-replacement experiments. See [GPT harness alignment](docs/GPT_HARNESS_ALIGNMENT.md)
 for the instruction comparison and recommended optional GPT instruction supplement.
 
 ## Building and testing the source
