@@ -17,3 +17,7 @@ Capture a fresh synthetic Claude Code request through `experiments/prompt-transl
 ## Test and deployment status
 
 These modes are protocol/compatibility optimizations. Deterministic synthetic tests can verify the exact rewrite and structural invariants, but cannot establish whether the model becomes more autonomous or whether compacted descriptions reduce real-world accuracy. Keep `selective` as the stable baseline; enable `aggressive` explicitly only after testing it in the intended agent workload. Shunt log messages report applied or unmatched rule IDs **without logging prompt bodies or credentials**.
+
+## Verified native HTTP replay (2026-10-13)
+
+Real ARM64 Shunt translated the synthetic Claude Code 2.1.294 request to a local fake Responses backend. The user ran all three deterministic modes: off PASS (0 matched, 0 characters saved), selective PASS (4 rules, 1,108 characters saved), aggressive PASS (7 rules, 2,565 characters saved). All 20 tool definitions retained their names and parameter schemas, and every message matched the baseline. No inference was used. The source test is `tools/test-shunt-http-modes.py`; run it with the locally compiled Shunt using the `--shunt` and `--mode` arguments. Captured requests remain untracked for privacy.
