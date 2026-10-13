@@ -28,6 +28,7 @@ SIWC_HELPER="${CLAUDEX_SIWC_HELPER:-$DATA_ROOT/claudex-siwc.mjs}"
 SIWC_MARKER="$CFG_ROOT/native-siwc-enabled"
 SHUNT_CFG="$CFG_ROOT/shunt.toml"
 SHUNT_PATCH="$DATA_ROOT/patches/claudex-shunt.patch"
+REASONING_HELPER="${CLAUDEX_REASONING_HELPER:-$DATA_ROOT/codex-reasoning-defaults.py}"
 TRANSPORT_SRC_DIR="$DATA_ROOT/transport-source"
 
 CLAUDE_SETTINGS_SOL="$CFG_ROOT/claude-settings-sol.json"
@@ -63,6 +64,8 @@ Usage:
   claudex --version            # underlying Claude Code version for SDK clients
   claudex login
   claudex auth-status
+  claudex reasoning-defaults     # query/cache live Codex model defaults
+  claudex sync-t3                # sync T3 picker defaults from Codex metadata
   claudex logout
   claudex update
   claudex doctor
@@ -493,7 +496,6 @@ write_one_claude_settings() {
   cat > "$file" <<EOF
 {
   "model": "$selected_model",
-  "effortLevel": "medium",
   "modelPicker": {
     "replaceBuiltInOptions": true,
     "options": [
@@ -553,7 +555,6 @@ write_agents() {
 name: gpt-fast
 description: Fast inexpensive worker for bounded exploration OR straightforward implementation. Use for locating code, collecting evidence, mechanical edits, small fixes, simple tests, and other tasks where speed matters more than deep reasoning.
 model: gpt-6-luna[1m]
-effort: medium
 ---
 Work autonomously inside Claude Code. You may explore or implement: choose the shortest path that completes the delegated task. Keep scope bounded, verify concrete changes, and escalate if the task turns out to require deeper reasoning.
 EOF
@@ -571,7 +572,6 @@ EOF
 name: gpt-core
 description: Default Sol worker for either exploration or implementation when the task benefits from stronger reasoning, broader repository understanding, or multi-step execution.
 model: gpt-6.1-sol[1m]
-effort: medium
 ---
 Handle the task end-to-end. Investigate enough to understand the surrounding code, then implement or report findings as appropriate. Run focused verification and keep the result concise.
 EOF
@@ -589,7 +589,6 @@ EOF
 name: gpt-expert
 description: Astra specialist for the hardest architecture, root-cause, adversarial review, and unresolved reasoning tasks. Use selectively because it is slower and more token-hungry than Sol.
 model: gpt-6-astra[1m]
-effort: medium
 ---
 Focus on the hard part that justified escalation. Investigate deeply, identify the highest-leverage answer or change, verify it, and avoid expanding scope unnecessarily.
 EOF
@@ -1469,9 +1468,34 @@ launch() {
     settings="$CLAUDEX_MERGED_SETTINGS_FILE"
   fi
 
+  # Codex (not Claude Code) owns the implicit reasoning default. Discover the
+  # active model's default from Codex app-server model/list; never force a
+  # level when the caller supplied --effort explicitly (including T3 SDK).
+  local effective_model="$selected_model" caller_effort=0 effort_default=""
+  local index
+  for (( index=0; index < ${#forwarded_args[@]}; index++ )); do
+    case "${forwarded_args[$index]}" in
+      --effort|--effort=*) caller_effort=1 ;;
+      --model)
+        if (( index + 1 < ${#forwarded_args[@]} )); then
+          effective_model="${forwarded_args[$((index + 1))]}"
+        fi ;;
+      --model=*) effective_model="${forwarded_args[$index]#--model=}" ;;
+    esac
+  done
+  local -a default_effort_args=()
+  if [[ "$caller_effort" == 0 && "${CLAUDEX_USE_CODEX_DEFAULT_EFFORT:-1}" == 1 ]] \
+      && [[ -r "$REASONING_HELPER" ]] && have python3; then
+    effort_default="$(python3 "$REASONING_HELPER" get "$effective_model" 2>/dev/null || true)"
+    case "$effort_default" in
+      low|medium|high|xhigh|max) default_effort_args=(--effort "$effort_default") ;;
+    esac
+  fi
+
   # Do not exec: we need to tear down an ephemeral runtime after Claude exits.
   set +e
-  claude ${fast_args[@]+"${fast_args[@]}"} --settings "$settings" --model "$selected_model" "${forwarded_args[@]}"
+  claude ${fast_args[@]+"${fast_args[@]}"} --settings "$settings" --model "$selected_model" \
+    ${default_effort_args[@]+"${default_effort_args[@]}"} "${forwarded_args[@]}"
   claude_rc=$?
   set -e
   # EXIT trap unregisters this launcher; it must not stop other sessions.
@@ -1486,7 +1510,7 @@ uninstall_all() {
   # roots: they can contain encrypted SIWC profiles and unrelated user data.
   rm -f -- "$SHUNT_CFG" "$CLAUDE_SETTINGS_SOL" "$CLAUDE_SETTINGS_ASTRA" "$CLAUDE_SETTINGS_LUNA"
   rm -f -- "$DATA_ROOT/launcher" "$DATA_ROOT/shunt" "$DATA_ROOT/claudex-transport" \
-    "$DATA_ROOT/claudex-siwc.mjs" "$DATA_ROOT/patches/claudex-shunt.patch" \
+    "$DATA_ROOT/claudex-siwc.mjs" "$DATA_ROOT/codex-reasoning-defaults.py" "$DATA_ROOT/patches/claudex-shunt.patch" \
     "$DATA_ROOT/transport-source/Cargo.toml" "$DATA_ROOT/transport-source/main.rs"
   rm -f -- "$STATE_ROOT/shunt.pid" "$STATE_ROOT/transport.pid" \
     "$STATE_ROOT/shunt-version" "$STATE_ROOT/codex-transport-version" \
@@ -1538,6 +1562,14 @@ case "$cmd" in
   setup) with_runtime_lock setup_all ;;
   login) login_chatgpt ;;
   auth-status) auth_status ;;
+  reasoning-defaults)
+    have python3 || die "Python 3 is needed for Codex model discovery"
+    [[ -r "$REASONING_HELPER" ]] || die "Missing Codex model discovery: $REASONING_HELPER"
+    python3 "$REASONING_HELPER" list ;;
+  sync-t3)
+    have python3 || die "Python 3 is needed to synchronize T3 Code models"
+    [[ -r "$REASONING_HELPER" ]] || die "Missing Codex model discovery: $REASONING_HELPER"
+    python3 "$REASONING_HELPER" sync-t3 "${T3CODE_HOME:-$HOME/.t3}/userdata/settings.json" ;;
   logout) with_runtime_lock logout_chatgpt ;;
   update) with_runtime_lock update_all ;;
   doctor) doctor ;;

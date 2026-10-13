@@ -69,7 +69,7 @@ fi
 # managed (e.g. with chezmoi), but installer-owned files cannot be symlinks.
 for managed_target in \
   "$DATA_ROOT/launcher" "$DATA_ROOT/shunt" "$DATA_ROOT/claudex-transport" \
-  "$DATA_ROOT/claudex-siwc.mjs" "$DATA_ROOT/installed-wrapper-reference" \
+  "$DATA_ROOT/claudex-siwc.mjs" "$DATA_ROOT/codex-reasoning-defaults.py" "$DATA_ROOT/installed-wrapper-reference" \
   "$DATA_ROOT/installer-owned-wrapper" \
   "$DATA_ROOT/patches/claudex-shunt.patch" \
   "$DATA_ROOT/transport-source/Cargo.toml" "$DATA_ROOT/transport-source/main.rs" \
@@ -96,6 +96,7 @@ fi
 
 mkdir -p "$BIN_ROOT" "$DATA_ROOT/patches" "$DATA_ROOT/transport-source" "$STATE_ROOT"
 install -m 0755 "$SCRIPT_DIR/claudex" "$DATA_ROOT/launcher"
+install -m 0755 "$SCRIPT_DIR/tools/codex-reasoning-defaults.py" "$DATA_ROOT/codex-reasoning-defaults.py"
 install -m 0755 "$SCRIPT_DIR/wrapper/claudex" "$BIN_ROOT/claudex"
 install -m 0644 "$SCRIPT_DIR/wrapper/claudex" "$DATA_ROOT/installed-wrapper-reference"
 if [[ "$installer_created_wrapper" == 1 ]]; then

@@ -42,6 +42,23 @@ A software copyright license and permission to use ChatGPT-plan benefits are **s
 
 Use a **separately authorized API credential** for independent tools rather than treating a consumer ChatGPT subscription as an API key.
 
+## Model-specific Codex reasoning defaults
+
+Claudex resolves implicit reasoning effort from the installed, authenticated Codex CLI's
+`app-server` `model/list` endpoint, specifically `defaultReasoningEffort` and
+`supportedReasoningEfforts`. It caches only nonsecret model metadata (six-hour TTL).
+When the installed Codex CLI is older than a new GPT model, a recent Codex-provider
+snapshot from T3 Code can supply that model's default. Missing metadata is **not**
+replaced with a guessed, hardcoded GPT default. Caller-provided `--effort` always wins.
+
+Use `claudex reasoning-defaults` to inspect discovered values, or `claudex sync-t3`
+to synchronize the *default reasoning options* of existing Claudex custom models
+in `~/.t3/userdata/settings.json`. The sync makes a private backup, preserves other
+provider settings and existing model selections, and requires a T3 provider refresh
+for a running service. Set `CLAUDEX_USE_CODEX_DEFAULT_EFFORT=0` to disable implicit
+CLI injection temporarily. See [GPT harness alignment](docs/GPT_HARNESS_ALIGNMENT.md)
+for the instruction comparison and recommended optional GPT instruction supplement.
+
 ## Building and testing the source
 
 The version pins in SHUNT_REVISION, CODEX_REVISION and SIWC_REVISION identify upstream commits used for the experimental code. Builds must use a compatible supported Rust toolchain, Git and Python 3.9+; Node.js 22+ is used for credential-adapter unit tests.
