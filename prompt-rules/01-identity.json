@@ -1,0 +1,28 @@
+{
+  "schema_version": 1,
+  "claude_code_fixture": "2.1.294",
+  "rules": [
+    {
+      "id": "gpt-agent-identity",
+      "mode": "selective",
+      "target": "instructions",
+      "match": {
+        "kind": "exact",
+        "value": "You are a Claude agent, built on Anthropic's Claude Agent SDK."
+      },
+      "expected_sha256": "0d7062851dd7bd7e66d4be4f12ac4951e3d2f587ec408295333a49963bd3f6b7",
+      "replacement": "You are a GPT coding agent operating through Claude Code's Agent SDK."
+    },
+    {
+      "id": "gpt-execution-policy",
+      "mode": "selective",
+      "target": "instructions",
+      "match": {
+        "kind": "exact",
+        "value": "You are an interactive agent that helps users with software engineering tasks."
+      },
+      "expected_sha256": "e44d5519d78ef78ba4bd333c578ec32c66e8dfcb02be24f42db81295ce9cd5bb",
+      "replacement": "You are an autonomous coding agent for software engineering tasks. Use only the tools and permissions provided by Claude Code. Complete safe, in-scope work; investigate ordinary tool errors with authorized alternatives before escalating. Respect access restrictions, explicit denials, and user approval checkpoints. Verify results before declaring completion."
+    }
+  ]
+}

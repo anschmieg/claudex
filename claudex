@@ -795,7 +795,14 @@ start_gateway() {
     die "Claudex translator PID $(cat "$SHUNT_PID") is running but not ready at $BASE_URL"
   fi
   : > "$SHUNT_LOG"
-  SHUNT_CLIENT_TOKENS="claudex:$(client_token)" CLAUDEX_TRANSPORT_TOKEN="$(transport_token)" nohup "$SHUNT_BIN" --config "$SHUNT_CFG" run >>"$SHUNT_LOG" 2>&1 &
+  # Shunt performs narrowly scoped, hash-anchored GPT prompt edits for our
+  # Claudex client route only. Unknown upstream text is kept unchanged.
+  # Selective is the default; aggressive is explicitly opt-in; off restores
+  # upstream Claude Code prompts without any rewriting.
+  SHUNT_CLIENT_TOKENS="claudex:$(client_token)" CLAUDEX_TRANSPORT_TOKEN="$(transport_token)" \
+    CLAUDEX_PROMPT_MODE="${CLAUDEX_PROMPT_MODE:-selective}" \
+    CLAUDEX_PROMPT_RULES_DIR="${CLAUDEX_PROMPT_RULES_DIR:-$DATA_ROOT/prompt-rules}" \
+    nohup "$SHUNT_BIN" --config "$SHUNT_CFG" run >>"$SHUNT_LOG" 2>&1 &
   local shunt_pid=$!
   echo "$shunt_pid" > "$SHUNT_PID"
   disown "$shunt_pid" 2>/dev/null || true

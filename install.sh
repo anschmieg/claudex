@@ -71,6 +71,11 @@ if [[ -L "$DATA_ROOT/prompts" ]]; then
   echo "Refusing symlinked Claudex prompts directory: $DATA_ROOT/prompts" >&2
   exit 5
 fi
+if [[ -L "$DATA_ROOT/prompt-rules" ]]; then
+  echo "Refusing symlinked Claudex prompt rules directory: $DATA_ROOT/prompt-rules" >&2
+  exit 5
+fi
+
 
 # Protect all individual installer-owned destinations against symlink
 # redirection before performing ANY writes. Directory symlinks may be user-
@@ -78,7 +83,8 @@ fi
 for managed_target in \
   "$DATA_ROOT/launcher" "$DATA_ROOT/shunt" "$DATA_ROOT/claudex-transport" \
   "$DATA_ROOT/claudex-siwc.mjs" "$DATA_ROOT/codex-reasoning-defaults.py" \
-  "$DATA_ROOT/prompts/gpt-execution-overlay.md" "$DATA_ROOT/installed-wrapper-reference" \
+  "$DATA_ROOT/prompts/gpt-execution-overlay.md" "$DATA_ROOT/prompt-rules/01-identity.json" \
+  "$DATA_ROOT/prompt-rules/02-environment.json" "$DATA_ROOT/prompt-rules/03-tool-compression.json" "$DATA_ROOT/installed-wrapper-reference" \
   "$DATA_ROOT/installer-owned-wrapper" \
   "$DATA_ROOT/patches/claudex-shunt.patch" \
   "$DATA_ROOT/transport-source/Cargo.toml" "$DATA_ROOT/transport-source/main.rs" \
@@ -113,6 +119,11 @@ install -m 0755 "$SCRIPT_DIR/claudex" "$DATA_ROOT/launcher"
 install -m 0755 "$SCRIPT_DIR/tools/codex-reasoning-defaults.py" "$DATA_ROOT/codex-reasoning-defaults.py"
 install -d -m 0755 "$DATA_ROOT/prompts"
 install -m 0644 "$SCRIPT_DIR/prompts/gpt-execution-overlay.md" "$DATA_ROOT/prompts/gpt-execution-overlay.md"
+install -d -m 0755 "$DATA_ROOT/prompt-rules"
+for rule in "$SCRIPT_DIR"/prompt-rules/*.json; do
+  [[ -f "$rule" ]] || continue
+  install -m 0644 "$rule" "$DATA_ROOT/prompt-rules/$(basename "$rule")"
+done
 if [[ "$PRESERVE_WRAPPER" == 0 ]]; then
   install -m 0755 "$SCRIPT_DIR/wrapper/claudex" "$BIN_ROOT/claudex"
   install -m 0644 "$SCRIPT_DIR/wrapper/claudex" "$DATA_ROOT/installed-wrapper-reference"

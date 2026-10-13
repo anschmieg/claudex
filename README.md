@@ -61,6 +61,12 @@ CLI injection temporarily. A candidate GPT-specific appended instruction file ex
 It is disabled by default pending selective prompt-replacement experiments. See [GPT harness alignment](docs/GPT_HARNESS_ALIGNMENT.md)
 for the instruction comparison and recommended optional GPT instruction supplement.
 
+## Versioned prompt optimization
+
+Claudex's patched Shunt can selectively replace **exact fingerprinted** Claude-specific instructions while preserving upstream Claude Code updates, tool schemas, permissions and user/project context. The default `CLAUDEX_PROMPT_MODE=selective` applies four reviewed rules. Set `CLAUDEX_PROMPT_MODE=aggressive` to additionally compact three lengthy tool-description examples, or `CLAUDEX_PROMPT_MODE=off` for byte-for-byte upstream passthrough. The mode takes effect when the Claudex Shunt process starts. Rules are independent JSON files in [`prompt-rules/`](prompt-rules/README.md); unmatched rules fail closed, preserve the upstream text and emit only a diagnostic rule ID. The previous additive `CLAUDEX_GPT_OVERLAY` remains opt-in and is not needed for this mode.
+
+Measured against a synthetic real Claude Code 2.1.294 capture, selective saved 1,108 characters (3.26%) and aggressive saved 2,565 characters (7.54%) of combined system instructions and tool descriptions. These are **character** savings, not verified model-context token reductions or inference-quality guarantees. Synthetic regression tests cover matching, identity, preserved permissions and tool schemas. Different upstream Claude Code versions may legitimately match fewer rules until reviewed.
+
 ## Building and testing the source
 
 The version pins in SHUNT_REVISION, CODEX_REVISION and SIWC_REVISION identify upstream commits used for the experimental code. Builds must use a compatible supported Rust toolchain, Git and Python 3.9+; Node.js 22+ is used for credential-adapter unit tests.

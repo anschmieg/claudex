@@ -1,0 +1,58 @@
+{
+  "schema_version": 1,
+  "claude_code_fixture": "2.1.294",
+  "rules": [
+    {
+      "id": "schedulewakeup-gpt-cache-neutral",
+      "mode": "selective",
+      "target": "tool_description",
+      "tool": "ScheduleWakeup",
+      "match": {
+        "kind": "section",
+        "start": "## Picking delaySeconds\n",
+        "end": "## The reason field\n"
+      },
+      "expected_sha256": "2711b3c8dfc5f9061eb24733bfb4d3ffdd5a0f5afe1aefe727053d35a06ae041",
+      "replacement": "## Picking delaySeconds\n\nChoose based on the external event rather than Anthropic-specific prompt-cache windows. For untracked external CI/deploy checks use an appropriate 60–270s interval; for idle/quiet loops use 1200–1800s, or a 1200s+ fallback when tracked background work is running. Avoid short polling of harness-tracked tasks; they notify you automatically. The runtime clamps to [60, 3600].\n\n"
+    },
+    {
+      "id": "croncreate-concise-jitter",
+      "mode": "aggressive",
+      "target": "tool_description",
+      "tool": "CronCreate",
+      "match": {
+        "kind": "section",
+        "start": "## Avoid the :00 and :30 minute marks when the task allows it\n",
+        "end": "## Durability\n"
+      },
+      "expected_sha256": "d6ebaecc774d1c13f5b9732998c77399da5be13670d23b13d0ff0133c6a68a58",
+      "replacement": "## Avoid synchronized times when approximate\n\nFor approximate schedules, choose an off-minute (e.g., 8:57 instead of 9:00, 7 minutes past for hourly) to spread load. Honor exact user-requested clock times, including :00 or :30; never silently shift a specified time. The scheduler may add deterministic jitter.\n\n"
+    },
+    {
+      "id": "enterworktree-deduplicate-eligibility",
+      "mode": "aggressive",
+      "target": "tool_description",
+      "tool": "EnterWorktree",
+      "match": {
+        "kind": "section",
+        "start": "## When to Use\n",
+        "end": "## Requirements\n"
+      },
+      "expected_sha256": "da04f38ee25ac933530264d544aa7cba9031cd1a3f1b86a8a2aee72e29188f81",
+      "replacement": "## When to Use\n\nEnter a worktree only if the user explicitly requested one or project CLAUDE.md/memory requires it. Creating/switching a branch or simply doing a coding task does not authorize a worktree: use the normal Git workflow unless expressly directed otherwise.\n\n"
+    },
+    {
+      "id": "workflow-shortened-example",
+      "mode": "aggressive",
+      "target": "tool_description",
+      "tool": "Workflow",
+      "match": {
+        "kind": "section",
+        "start": "The canonical multi-stage pattern",
+        "end": "Before writing a script, load"
+      },
+      "expected_sha256": "3730d62aca05deffd0399956b08a631aee20d211d12f6129970a08605c9024fe",
+      "replacement": "The canonical multi-stage pattern uses `export const meta = {name, description, phases: [...]}` followed by `pipeline(...)` and `agent(...)` calls, with independent `parallel(...)` verification of findings. Use the `workflow-authoring` skill for the precise API and full examples; do not invent function signatures.\n\n"
+    }
+  ]
+}

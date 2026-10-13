@@ -1,0 +1,18 @@
+{
+  "schema_version": 1,
+  "claude_code_fixture": "2.1.294",
+  "rules": [
+    {
+      "id": "gpt-backend-environment",
+      "mode": "selective",
+      "target": "instructions",
+      "match": {
+        "kind": "section",
+        "start": "# Environment\n",
+        "end": "# Context management\n"
+      },
+      "expected_sha256": "215c21d1add917449dedb12ec7903390a7639ee519f9334cc047dc61d8e94a12",
+      "replacement": "# Environment\n - You operate in Claude Code with GPT model {model} routed through Claudex. Model availability and default reasoning come from Codex metadata, not Claude family descriptions. Claude Code's /fast description may not apply to the GPT backend.\n\n"
+    }
+  ]
+}
