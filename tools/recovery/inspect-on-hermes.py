@@ -27,7 +27,7 @@ def systemd_prop(unit: str, properties: str):
         return
     for line in run.stdout.splitlines():
         if line.startswith(("ActiveState=", "UnitFileState=", "Result=", "ExecMainStatus=",
-                            "NextElapseUSecRealtime=", "LastTriggerUSec=")):
+                            "NextElapseUSecRealtime=", "NextElapseUSecMonotonic=", "LastTriggerUSec=")):
             print("SYSTEMD", unit, line)
 
 def cron_results():
@@ -68,9 +68,12 @@ def cron_results():
                         continue
                     stamp, tool, args = info
                     val = block.get("content", "")
-                    raw = val if isinstance(val, str) else json.dumps(val)
+                    if isinstance(val, list):
+                        raw = "\n".join(x.get("text", "") for x in val if isinstance(x, dict) and isinstance(x.get("text"), str))
+                    else:
+                        raw = val if isinstance(val, str) else json.dumps(val)
+                    cron = args.get("cron") if isinstance(args, dict) else None
                     if tool == "CronCreate":
-                        cron = args.get("cron") if isinstance(args, dict) else None
                         if cron != "*/5 * * * *":
                             continue
                     # Extract likely ID key/value pairs, never the cron prompt.
@@ -79,15 +82,21 @@ def cron_results():
                         raw, flags=re.IGNORECASE
                     )))
                     specs = ["*/5 * * * *"] if "*/5 * * * *" in raw else []
-                    records.append((stamp, tool, cron, len(raw), safe_ids[:5], specs[:5]))
+                    # Only the creation result and latest lists are relevant.
+                    # Sanitize raw scheduler replies for inspection; redact
+                    # any cron prompt, message text or credential-like strings.
+                    safe_raw = re.sub(r'(?i)(["\\\'](?:prompt|message|text|authorization|token|secret)["\\\']\\s*[:=]\\s*)["\\\'][^"\\\']*["\\\']', r'\\1[REDACTED]', raw)
+                    safe_raw = re.sub(r'(?i)(?:sk-|bearer\\s+)[a-zA-Z0-9_./=-]{15,}', '[REDACTED]', safe_raw)
+                    records.append((stamp, tool, cron, len(raw), safe_ids[:5], specs[:5], safe_raw[:220]))
     print("CRON_RECORDS_MATCHING_FILTERS", len(records))
-    for stamp, tool, cron, n, ids, specs in sorted(records)[-12:]:
+    for stamp, tool, cron, n, ids, specs, safe_raw in sorted(records)[-8:]:
         print("CRON_RESULT", stamp, tool, "requested_spec", cron,
-              "bytes", n, "job_id_candidates", ids, "result_specs", specs)
+              "bytes", n, "job_id_candidates", ids, "result_specs", specs,
+              "safe_result_excerpt", repr(safe_raw))
 
 def main():
     systemd_prop("claudex-recovery.timer",
-                 "ActiveState,UnitFileState,Result,LastTriggerUSec,NextElapseUSecRealtime")
+                 "ActiveState,UnitFileState,Result,LastTriggerUSec,NextElapseUSecRealtime,NextElapseUSecMonotonic")
     systemd_prop("claudex-recovery.service",
                  "ActiveState,Result,ExecMainStatus")
     systemd_prop("t3code.service", "ActiveState,Result")
