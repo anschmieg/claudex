@@ -19,7 +19,7 @@ This is reliable failure-triggered continuation, *not* a general AI goal governo
 
 ## Controls
 
-Install the verified `controller.py` to `~/.local/share/claudex/recovery/controller.py`, and the service/timer files to `~/.config/systemd/user/`. Run as the same Unix user that owns T3 Code.
+Install the verified `controller.py` to `~/.local/share/claudex/recovery/controller.py`, and the service/timer files to `~/.config/systemd/user/`. Run as the same Unix user that owns T3 Code. The installer uses **`uv run --with websockets==16.0`** with the target user's system Python and a user-owned uv cache at `~/.local/state/claudex-recovery/uv-cache`. It prefetches the pinned package once, then both the authenticated read-only check and systemd one-shot run with **`uv --offline`**, so a future network outage cannot cause a dependency download. No persistent `.venv`, pip installation, system Python modification, or T3 Code runtime change is needed. If uv is unavailable or the package cannot be prefetched, the installer stops **before enabling the timer**, preserving the existing enrollment.
 
 - `python3 controller.py --enroll-thread <T3_THREAD_UUID>`: explicitly enroll exactly one existing Claudex thread and establish a UTC starting point. Historic failures cannot trigger replay. Refuses existing configuration.
 - `python3 controller.py --status`: safe local status only.

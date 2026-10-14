@@ -9,7 +9,7 @@ ConditionPathExists=%h/.local/state/claudex-recovery/config.json
 Type=oneshot
 WorkingDirectory=%h
 Environment=PYTHONDONTWRITEBYTECODE=1
-ExecStart=/usr/bin/python3 %h/.local/share/claudex/recovery/controller.py --once --live
+ExecStart=%h/.local/share/claudex/recovery/run-controller.sh --once --live
 UMask=0077
 TimeoutStartSec=45
 MemoryMax=512M

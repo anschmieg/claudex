@@ -7,7 +7,7 @@ THREAD="${1:?Usage: bash tools/recovery/deploy-from-apollo.sh <T3 thread UUID>}"
 REMOTE="${CLAUDEX_REMOTE_HOST:-hermes}"
 SOURCE="$(cd "$(dirname "$0")" && pwd -P)"
 for file in controller.py test_controller.py test_transport.py test_crash_guard.py \
-  claudex-recovery.service claudex-recovery.timer README.md install-on-hermes.sh; do
+  claudex-recovery.service claudex-recovery.timer README.md run-controller.sh install-on-hermes.sh; do
   test -f "$SOURCE/$file" || { echo "Missing $SOURCE/$file" >&2; exit 3; }
 done
 
@@ -21,7 +21,7 @@ ssh "$REMOTE" 'mkdir -p "$HOME/.local/src/claudex/recovery-stage-v1"'
 echo "Staging isolated tested recovery source on $REMOTE..."
 scp -q "$SOURCE"/controller.py "$SOURCE"/test_controller.py "$SOURCE"/test_transport.py \
     "$SOURCE"/test_crash_guard.py "$SOURCE"/claudex-recovery.service \
-    "$SOURCE"/claudex-recovery.timer "$SOURCE"/README.md "$SOURCE"/install-on-hermes.sh \
+    "$SOURCE"/claudex-recovery.timer "$SOURCE"/README.md "$SOURCE"/run-controller.sh "$SOURCE"/install-on-hermes.sh \
     "$REMOTE:$REMOTE_DIR/"
 echo "Installing independently supervised recovery; T3 Code is not restarted."
 ssh "$REMOTE" "bash '$REMOTE_DIR/install-on-hermes.sh' '$THREAD'"
