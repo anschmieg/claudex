@@ -12,3 +12,5 @@ Enrollment is initially disabled. Show the user the goals and acceptance criteri
 `python3 "$HOME/.local/share/claudex/goal-governor/cli.py" enable --thread <uuid>`
 
 The independent timer is responsible for continuation, **not this skill**. Do not create CronCreate, /loop, or ScheduleWakeup jobs. Maintain all existing privileged browser operations and approvals unchanged.
+
+Once enrolled, manage independent work using `/goal-governor:tasks`. New user goal messages are reconciled automatically using `/goal-governor:reconcile`.

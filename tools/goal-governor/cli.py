@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse, importlib.util, json, os, sys
 from pathlib import Path
 import state
+import sync
 
 RECOVERY=Path(os.environ.get("CLAUDEX_RECOVERY_PY",
     str(Path.home()/".local/share/claudex/recovery/controller.py")))
@@ -37,8 +38,23 @@ def run():
     update.add_argument("--thread",required=True)
     update.add_argument("--next-action",required=True)
     update.add_argument("--evidence",required=True)
-    update.add_argument("--artifact",required=True)
+    update.add_argument("--artifact")
+    update.add_argument("--evidence-kind",choices=["artifact","test_report","user_decision"],default="artifact")
+    update.add_argument("--evidence-ref")
     update.add_argument("--expected-revision",type=int)
+    task_add=subs.add_parser("add-task")
+    task_add.add_argument("--thread",required=True);task_add.add_argument("--id",required=True)
+    task_add.add_argument("--title",required=True);task_add.add_argument("--depends",action="append",default=[])
+    task_set=subs.add_parser("set-task")
+    task_set.add_argument("--thread",required=True);task_set.add_argument("--id",required=True)
+    task_set.add_argument("--state",choices=["ready","running","blocked","completed","deferred"],required=True)
+    task_set.add_argument("--reason");task_set.add_argument("--evidence")
+    sync_now=subs.add_parser("sync")
+    sync_now.add_argument("--thread",required=True)
+    sync=subs.add_parser("reconcile")
+    sync.add_argument("--thread",required=True);sync.add_argument("--message-id",required=True)
+    sync.add_argument("--title");sync.add_argument("--acceptance",action="append")
+    sync.add_argument("--priority")
     for command in ("status","enable","disable","resume","pause","block"):
         x=subs.add_parser(command);x.add_argument("--thread",required=True)
         if command=="block":x.add_argument("--reason",required=True)
@@ -57,11 +73,41 @@ def run():
             obj=state.load(args.thread)
             print(json.dumps({key:obj.get(key) for key in
                 ("title","status","auto_enabled","acceptance","revision","next_action",
-                 "evidence","artifact","blocked_reason","completion_proposal")},indent=2))
+                 "evidence","artifact","blocked_reason","completion_proposal","tasks","intent_sync","plan_revision","immutable_constraints","acceptance_history")},indent=2))
             return
         elif args.op=="checkpoint":
-            obj=state.checkpoint(args.thread,args.next_action,args.evidence,args.artifact,
-                args.expected_revision)
+            if args.evidence_kind=='user_decision':
+                recover=project_for(args.thread)
+                import importlib.util
+                spec=importlib.util.spec_from_file_location('goal_cli_reread_t3',str(RECOVERY))
+                mod=importlib.util.module_from_spec(spec)
+                sys.modules[spec.name]=mod;spec.loader.exec_module(mod)
+                with mod.db_connect() as db:
+                    obj=state.checkpoint(args.thread,args.next_action,args.evidence,args.artifact,
+                        args.expected_revision,args.evidence_kind,args.evidence_ref,db)
+            else:
+                obj=state.checkpoint(args.thread,args.next_action,args.evidence,args.artifact,
+                    args.expected_revision,args.evidence_kind)
+        elif args.op=="add-task":
+            obj=state.add_task(args.thread,args.id,args.title,args.depends)
+        elif args.op=="set-task":
+            obj=state.task_state(args.thread,args.id,args.state,args.reason,args.evidence)
+        elif args.op=="sync":
+            obj=state.load(args.thread)
+            if obj.get('auto_enabled'):
+                import importlib.util
+                spec=importlib.util.spec_from_file_location('goal_sync_t3',str(RECOVERY))
+                mod=importlib.util.module_from_spec(spec)
+                sys.modules[spec.name]=mod;spec.loader.exec_module(mod)
+                with mod.db_connect() as db:
+                    updated=sync.ingest(obj,db)
+                if updated:state.write(state.path(args.thread),obj)
+            print(json.dumps({'result':'ok','pending_message_ids':
+              [m['message_id'] for m in obj['intent_sync']['pending']],
+              'ready_tasks':[t['id'] for t in __import__('tasks').ready(obj)]}))
+            return
+        elif args.op=="reconcile":
+            obj=state.reconcile_intent(args.thread,args.message_id,args.title,args.acceptance,args.priority)
         elif args.op=="propose-complete":
             obj=state.mark_review(args.thread,args.evidence)
         elif args.op=="block":

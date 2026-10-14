@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse, asyncio, datetime as dt, fcntl, hashlib, importlib.util, json, os, sys, uuid
 from pathlib import Path
 import state
+import tasks, sync
 
 RECOVERY=Path(os.environ.get("CLAUDEX_RECOVERY_PY",
    str(Path.home()/".local/share/claudex/recovery/controller.py")))
@@ -12,9 +13,16 @@ MAX_PER_DAY=24
 SETTLE_SECONDS=20
 MIN_GAP_SECONDS=90
 MAX_TRANSPORT_ATTEMPTS=3
+MAX_PLAN_ONLY_CHAIN=2
 MESSAGE=(
-  "Continue the existing approved goal in this T3 thread. Use the goal-governor "
-  "plugin to inspect the current goal and its explicit next action. Execute "
+  "Continue the existing approved goal in this T3 thread. The durable Goal "
+  "Governor v0.2 CLI is at $HOME/.local/share/claudex/goal-governor/cli.py. "
+  "Run 'python3 <cli-path> sync --thread <this-T3-thread-ID>' and then "
+  "'python3 <cli-path> status --thread <this-T3-thread-ID>' to inspect "
+  "pending human-origin message IDs and independent ready tasks. Reconcile "
+  "each genuinely updated user instruction with the 'reconcile' CLI before "
+  "against acceptance criteria before choosing the next task. Never treat "
+  "blocked maintenance as permission to bypass its approval. Execute "
   "substantial verified work rather than returning a status report. Before "
   "ending, checkpoint with a different actionable next step, meaningful "
   "progress evidence and a changed workspace artifact. If all acceptance "
@@ -35,13 +43,14 @@ def adapter():
     return mod
 
 def make_intent(goal,info):
-    stamp=goal["thread_id"]+":"+str(goal["revision"])
+    stamp=goal["thread_id"]+":"+str(goal["revision"])+":"+str(goal.get("plan_revision",0))
     def det(label):
         return str(uuid.UUID(bytes=hashlib.sha256(
           ("claudex-goal-governor-v1:"+label+":"+stamp).encode()
         ).digest()[:16],version=4))
     return dict(command_id=det("command"),message_id=det("message"),
       base_turn=info["turn_id"],revision=goal["revision"],
+      plan_revision=goal.get("plan_revision",0),
       created_at=state.now(),send_attempts=0)
 
 def check_receipt(db,intent):
@@ -75,7 +84,11 @@ def choose(goal,ledger,info,db,at):
         return "failure_recovery_owns",None
     if info.get("state")!="completed" or info.get("session_status")!="ready":
         return "not_ready",None
-    if not state.evidence_valid(goal) or len(goal.get("next_action",""))<20:
+    tasks.normalize(goal)
+    pending_sync=bool(goal['intent_sync']['pending'])
+    if goal['tasks'] and not tasks.ready(goal) and not pending_sync:
+        return 'no_ready_tasks',None
+    if (not state.evidence_valid(goal,db=db) and not pending_sync) or (len(goal.get("next_action",""))<20 and not pending_sync):
         return "missing_evidence",None
     completed=state.timeparse(info.get("completed_at"))
     if completed is None or (at-completed).total_seconds()<SETTLE_SECONDS:
@@ -87,7 +100,8 @@ def choose(goal,ledger,info,db,at):
             return ("received" if receipt=="accepted" else "rejected"),intent
         if intent["send_attempts"]>=MAX_TRANSPORT_ATTEMPTS:
             return "transport_ambiguous_exhausted",None
-        if info["turn_id"]!=intent["base_turn"] or goal["revision"]!=intent["revision"]:
+        if (info["turn_id"]!=intent["base_turn"] or goal["revision"]!=intent["revision"] or
+                goal.get("plan_revision",0)!=intent.get("plan_revision",0)):
             return "superseded",None
         interval=30 if intent["send_attempts"]==1 else 120
         last=state.timeparse(ledger.get("last_send_at"))
@@ -104,7 +118,10 @@ def choose(goal,ledger,info,db,at):
         if info["turn_id"]==ledger.get("anchor_turn"):
             return "await_new_turn",None
         if goal["revision"]<=previous:
-            return "stalled_no_checkpoint",None
+            if goal.get("plan_revision",0)<=ledger.get("dispatched_plan_revision",0):
+                return "stalled_no_checkpoint",None
+            if ledger.get('plan_only_count',0)>=MAX_PLAN_ONLY_CHAIN:
+                return "stalled_no_checkpoint",None
     times=[state.timeparse(t) for t in ledger.get("launches",[])]
     times=[t for t in times if t is not None]
     if sum((at-t).total_seconds()<3600 for t in times)>=MAX_PER_HOUR:
@@ -117,7 +134,12 @@ def choose(goal,ledger,info,db,at):
     return "prepare",make_intent(goal,info)
 
 def record_dispatch(ledger,intent):
+    if ledger.get('dispatched_revision')==intent['revision']:
+        ledger['plan_only_count']=ledger.get('plan_only_count',0)+1
+    else:
+        ledger['plan_only_count']=0
     ledger.update(intent=None,dispatched_revision=intent["revision"],
+      dispatched_plan_revision=intent.get("plan_revision",0),
       anchor_turn=intent["base_turn"],last_dispatch_at=state.now())
     ledger["launches"]=(ledger.get("launches",[])+[state.now()])[-MAX_PER_DAY:]
 
@@ -162,12 +184,17 @@ def _tick_with_shared_lock(recovery,ledger_path,live):
         ledger=state.read(ledger_path) if ledger_path.exists() else {"version":1,"threads":{}}
         if ledger.get("version")!=1:raise RuntimeError("invalid ledger")
         for file in sorted(state.home().glob("*.json")):
-            goal=state.read(file)
-            if goal.get("version")!=1 or not goal.get("auto_enabled") or goal.get("status")!="active":
+            goal=tasks.normalize(state.read(file))
+            if goal.get("version")!=1 or not goal.get("auto_enabled"):
                 continue
             thread=state.uuidcheck(goal["thread_id"])
             row=ledger["threads"].setdefault(thread,{"intent":None,"launches":[]})
             with recovery.db_connect() as db:
+                # Observe only real client-origin messages. Never make their
+                # content into executable commands or automatic approvals.
+                has_new_intent=sync.ingest(goal,db)
+                if live and has_new_intent:
+                    state.write(file,goal)
                 info=recovery.inspect_thread(db,thread)
                 result=advance(goal,row,info,db,dt.datetime.now(dt.timezone.utc),
                                send=bool(live))
@@ -193,6 +220,7 @@ def _tick_with_shared_lock(recovery,ledger_path,live):
                     new_info.get("pending_user_input_count") or
                     new_info.get("interrupted") or
                     state.load(thread).get("revision")!=intent["revision"] or
+                    state.load(thread).get("plan_revision",0)!=intent.get("plan_revision",0) or
                     human_message_after(db,thread,new_info["completed_at"])):
                     continue
             intent["send_attempts"]+=1
@@ -203,7 +231,7 @@ def _tick_with_shared_lock(recovery,ledger_path,live):
                 recovery.t3_http_health(token)
                 cmd={"type":"thread.turn.start","commandId":intent["command_id"],
                     "threadId":thread,"message":{"messageId":intent["message_id"],
-                    "role":"user","text":MESSAGE,"attachments":[]},
+                    "role":"user","text":MESSAGE+" Thread ID: "+thread+".","attachments":[]},
                     "runtimeMode":new_info["runtime_mode"],
                     "interactionMode":new_info["interaction_mode"],
                     "createdAt":intent["created_at"]}

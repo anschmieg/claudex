@@ -72,6 +72,16 @@ class TestGovernor(unittest.TestCase):
         with contextlib.redirect_stdout(io.StringIO()):
             self.assertEqual(supervisor.advance(self.goal,self.ledger,info(),self.db,AT,send=True),"stalled")
         self.assertEqual(self.goal["status"],"needs_review")
+    def test_task_plan_changes_cannot_create_endless_unverified_turns(self):
+        self.ledger["dispatched_revision"]=0
+        self.ledger["dispatched_plan_revision"]=0
+        self.ledger["anchor_turn"]="older-turn"
+        self.goal["plan_revision"]=1
+        self.ledger["plan_only_count"]=1
+        self.assertEqual(self.decide()[0],"prepare")
+        self.ledger["plan_only_count"]=2
+        self.assertEqual(self.decide()[0],"stalled_no_checkpoint")
+
     def test_waits_for_new_turn_not_repeat(self):
         self.ledger["dispatched_revision"]=0
         self.ledger["anchor_turn"]=info()["turn_id"]

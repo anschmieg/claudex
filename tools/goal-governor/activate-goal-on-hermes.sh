@@ -9,7 +9,7 @@ USER_ID="${CLAUDEX_TARGET_USER:-t3}"
 HOME_DIR="$(getent passwd "$USER_ID" | cut -d: -f6)"
 CLI="$HOME_DIR/.local/share/claudex/goal-governor/cli.py"
 SUPERVISOR="$HOME_DIR/.local/share/claudex/goal-governor/supervisor.py"
-[[ -f "$CLI" && -f "$SUPERVISOR" ]] || { echo "Install the Goal Governor first" >&2;exit 3; }
+sudo -n test -f "$CLI" && sudo -n test -f "$SUPERVISOR" || { echo "Install the Goal Governor first" >&2;exit 3; }
 sudo -n systemctl --machine="$USER_ID@.host" --user is-active claudex-recovery.timer >/dev/null
 
 # Only the user who removed/verified the exact old job can attest this.

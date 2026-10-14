@@ -2,6 +2,7 @@
 """Durable goal records. Independent of T3, Claude Code and Claudex internals."""
 from __future__ import annotations
 import contextlib, datetime as dt, fcntl, hashlib, json, os, stat, tempfile, uuid
+import tasks
 from pathlib import Path
 
 SCHEMA=1
@@ -65,7 +66,7 @@ def load(thread):
     obj=read(path(thread))
     if obj.get("version")!=SCHEMA or obj.get("thread_id")!=thread:
         raise ValueError("invalid goal identity")
-    return obj
+    return tasks.normalize(obj)
 
 def create(thread,project,workspace,title,acceptance,next_action):
     uuidcheck(thread);uuidcheck(project)
@@ -80,6 +81,7 @@ def create(thread,project,workspace,title,acceptance,next_action):
         status="active",auto_enabled=False,revision=0,updated_at=now(),enrolled_at=now(),
         next_action=next_action.strip()[:1800],evidence="User-enrolled initial goal",
         artifact=None,blocked_reason=None,completion_proposal=None)
+    tasks.normalize(obj)
     write(file,obj)
     return obj
 
@@ -99,14 +101,42 @@ def artifact_digest(workspace,artifact):
         raise ValueError("evidence size/type")
     return {"path":str(rel),"sha256":hashlib.sha256(final.read_bytes()).hexdigest(),"size":meta.st_size}
 
-def evidence_valid(obj):
+def user_message_evidence(db,thread,message_id):
+    """Evidence of a real UI-origin user decision, never a tool-created prompt.
+
+    Validating a decision is NOT an authorization for external privileged work.
+    """
+    from sync import client_messages
+    row=db.execute("""SELECT message_id,created_at,text FROM projection_thread_messages
+        WHERE thread_id=? AND message_id=? AND role='user' LIMIT 1""",
+        (thread,message_id)).fetchone()
+    if not row or not row['text'] or len(row['text'].strip())<10:
+        raise ValueError('no verifiable user decision')
+    events=db.execute("""SELECT payload_json FROM orchestration_events
+        WHERE stream_id=? AND event_type='thread.turn-start-requested'
+          AND actor_kind='client' ORDER BY occurred_at DESC LIMIT 500""",
+        (thread,)).fetchall()
+    if not any(isinstance(json.loads(event['payload_json'] or '{}'),dict) and
+       json.loads(event['payload_json'] or '{}').get('messageId')==message_id for event in events):
+        raise ValueError('user decision not client-origin')
+    return dict(kind='user_decision',message_id=message_id,
+                sha256=hashlib.sha256(row['text'].encode()).hexdigest())
+
+def evidence_valid(obj,db=None):
     item=obj.get("artifact")
     if item is None:return obj.get("revision")==0
+    if item.get('kind')=='user_decision':
+        if db is None:return True  # CLI verified at checkpoint creation.
+        try:return user_message_evidence(db,obj['thread_id'],item['message_id'])==item
+        except (OSError,ValueError,KeyError,TypeError):return False
     try:
-        return artifact_digest(obj["workspace"],item["path"])==item
+        measured=artifact_digest(obj["workspace"],item["path"])
+        if item.get('kind')=='test_report':measured['kind']='test_report'
+        return measured==item
     except (OSError,ValueError,KeyError):return False
 
-def checkpoint(thread,next_action,evidence,artifact,expected_revision=None):
+def checkpoint(thread,next_action,evidence,artifact=None,expected_revision=None,
+               evidence_kind='artifact',evidence_ref=None,db=None):
     obj=load(thread)
     if obj["status"]!="active":raise ValueError("inactive goal")
     if expected_revision is not None and obj["revision"]!=expected_revision:
@@ -115,9 +145,16 @@ def checkpoint(thread,next_action,evidence,artifact,expected_revision=None):
         raise ValueError("concrete progress and next action required")
     if next_action.strip()==obj["next_action"]:
         raise ValueError("next action did not advance")
-    digest=artifact_digest(obj["workspace"],artifact)
+    if evidence_kind=='user_decision':
+        if db is None or not evidence_ref:raise ValueError('user decision needs T3 verification')
+        digest=user_message_evidence(db,obj['thread_id'],evidence_ref)
+    elif evidence_kind in ('artifact','test_report'):
+        if artifact is None:raise ValueError('evidence file required')
+        digest=artifact_digest(obj["workspace"],artifact)
+        if evidence_kind=='test_report':digest['kind']='test_report'
+    else:raise ValueError('unsupported evidence kind')
     if obj.get("artifact")==digest:
-        raise ValueError("evidence artifact unchanged")
+        raise ValueError("evidence unchanged")
     obj.update(revision=obj["revision"]+1,next_action=next_action.strip()[:1800],
         evidence=evidence.strip()[:1500],artifact=digest,updated_at=now(),blocked_reason=None)
     write(path(thread),obj)
@@ -136,6 +173,39 @@ def mark_review(thread,evidence):
     obj=load(thread)
     if obj["status"]!="active":raise ValueError("goal not active")
     obj.update(status="needs_review",completion_proposal=evidence[:3000],updated_at=now())
+    write(path(thread),obj)
+    return obj
+
+def add_task(thread,key,title,depends=()):
+    obj=load(thread)
+    tasks.add(obj,key,title,depends)
+    if obj['status'] in ('blocked','needs_review') and tasks.ready(obj):
+        obj['status']='active'
+        obj['blocked_reason']=None  # Original reason retained in legacy-blocker task.
+    write(path(thread),obj)
+    return obj
+
+def task_state(thread,key,status,reason=None,evidence=None):
+    obj=load(thread)
+    tasks.transition(obj,key,status,reason,evidence)
+    obj['status']=tasks.aggregate(obj)
+    if obj['status']=='active':obj['blocked_reason']=None
+    write(path(thread),obj)
+    return obj
+
+def reconcile_intent(thread,message_id,title=None,acceptance=None,priority=None):
+    obj=load(thread)
+    tasks.reconcile(obj,message_id,title,acceptance,priority)
+    sync_task='sync-'+message_id.replace('-','')[:14].lower()
+    if any(t['id']==sync_task for t in obj['tasks']):
+        tasks.transition(obj,sync_task,'completed',
+            evidence='Reconciled recorded client-origin user instruction '+message_id)
+    if priority is not None and not tasks.ready(obj):
+        task_id='work-'+message_id.replace('-','')[:14].lower()
+        if not any(t['id']==task_id for t in obj['tasks']):
+            tasks.add(obj,task_id,priority)
+    obj['status']=tasks.aggregate(obj)
+    if obj['status']=='active':obj['blocked_reason']=None
     write(path(thread),obj)
     return obj
 

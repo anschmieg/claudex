@@ -11,3 +11,5 @@ Then:
 Evidence is hashed by the CLI from a real, changed, nonsensitive file beneath the project workspace. Never invent evidence; if no concrete artifact or safe work exists, do not fabricate one to perpetuate a loop. Instead call the block or propose-complete operation as appropriate.
 
 Never repeat an ambiguous write, bypass human approval, or spawn a cron polling job. The supervisor continues work only after T3 confirms a successful settled turn and the goal has made verifiable progress.
+
+Evidence variants: `--evidence-kind test_report --artifact <workspace-local-test-report>` accepts a hashed test-result file, and `--evidence-kind user_decision --evidence-ref <client-message-id>` verifies a human-origin T3 decision instead of requiring a source edit. Decisions do not authorize privileged external writes.

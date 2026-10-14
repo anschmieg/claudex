@@ -47,3 +47,69 @@ As t3, use cli.py under ~/.local/share/claudex/goal-governor/: status, checkpoin
     claude plugin validate ./tools/goal-governor/plugin
 
 Tests use synthetic goal records and an injected fake T3 RPC. No real model is invoked. A live test of resumed completed turns plus an intentional non-progressing stop is required before production autonomy can be considered fully validated.
+
+## Version 0.2 — automatic goal sync and task-level autonomy
+
+This upgrade is **backward compatible** with existing version-1 goal records and
+does not delete or reset a checkpoint, idempotent command receipt, or original
+blocked reason. An old global blocker is migrated into a `legacy-blocker` task
+while independent new work may proceed. The blocked operation retains its
+original authorization requirements.
+
+The timer reads only T3 events with `actor_kind=client` and
+`event_type=thread.turn-start-requested` and matches their original user-role
+messages by `messageId`. Provider-generated cron, agent or recovery messages
+are excluded. It queues message ID, timestamp, and SHA256 (not the full user
+prompt) for reconciliation. A bounded recent-client-message backfill runs on
+initial migration. The agent also receives a bounded `UserPromptSubmit` hook
+hint to call `cli.py sync --thread <uuid>` during a normal turn.
+
+The agent must inspect queued user messages from its existing T3 context and
+explicitly call `cli.py reconcile --thread <uuid> --message-id <id> --priority
+"<new next step>"` to commit a goal change. Updated acceptance criteria are
+versioned and preserved in `acceptance_history`. The code-level immutable
+constraints prohibit treating a goal update as permission to bypass protected
+writes, erase leases or replay uncertain operations.
+
+Independent task records have `ready`, `running`, `blocked`, `completed`, and
+`deferred` states with optional dependencies. `cli.py add-task` and
+`cli.py set-task` update individual tasks; one blocked operation no longer
+blocks the project if independent tasks remain ready.
+
+Checkpoints accept hashed workspace artifacts (including reproducible test
+reports) and verified user-origin T3 decisions via `--evidence-kind
+user_decision --evidence-ref <message-id>`. A user decision represents
+priorities and does **not** authorize protected external changes. Evidence is
+checked during continuation, and repeated or fabricated evidence cannot cause
+an endless sequence of turns.
+
+The new reconciliation module and task plan have independent revision numbers;
+the governor's accepted idempotent command IDs remain stable across ambiguous
+RPC responses. A completed turn without a new checkpoint or new plan is marked
+`needs_review`, not automatically repeated. The old failure supervisor remains
+responsible for failed/crashed turns, with its original shared execution lock.
+
+### Safe hot upgrade on an active Hermes installation
+
+Run **locally on Apollo**:
+
+    bash "$HOME/Documents/ChatGPT Workspace/claudex/publishing/claudex-public-source/tools/goal-governor/upgrade-from-apollo.sh"
+
+This script preserves active T3/Claudex sessions and the failure-recovery timer.
+It pauses only the Goal Governor timer, backs up existing code and goal state
+under the `t3` user's private state directory, validates the plugin and dry-run,
+and resumes the timer. On failure it restores old code and restarts the timer.
+It never modifies the root-owned browser broker or its retained operation.
+
+After deployment, use the existing T3 thread normally. The agent should
+recognize and reconcile new user goals without a separate follow-up prompt.
+Running Claude Code sessions may need `/reload-plugins` to load new skill
+metadata. The independent timer can still queue and dispatch a single
+reconciliation request if a live session doesn't load the updated plugin yet.
+
+### Version 0.2 release tests (additions)
+
+    PYTHONDONTWRITEBYTECODE=1 python3 tools/goal-governor/test_sync.py
+    PYTHONDONTWRITEBYTECODE=1 python3 tools/goal-governor/test_hook.py
+
+These verify client-origin message filters, queued-instruction durability, task-level blocking, immutable protected-operation boundaries, independent report/decision evidence, and bounded hook output. Automatic goal synchronization uses the model to interpret the original human message, but the governor itself never blindly executes its text or treats it as a privileged deployment grant.

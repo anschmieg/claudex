@@ -18,11 +18,16 @@ class FakeDB:
     def execute(self,sql,values=()):
         if "FROM orchestration_command_receipts" in sql:
             return Cursor([{"status":self.recovery.receipt_status}]) if self.recovery.receipt_status else Cursor([])
+        if "FROM orchestration_events" in sql:
+            return Cursor([x for x in self.recovery.events if x["occurred_at"]>values[1]])
+        if "SELECT message_id,created_at,text FROM projection_thread_messages" in sql:
+            return Cursor([self.recovery.message] if self.recovery.message and values[1]==self.recovery.message['message_id'] else [])
         if "FROM projection_thread_messages" in sql:return Cursor([])
         raise AssertionError("unexpected query")
 class Cursor:
     def __init__(self,data):self.data=data
     def fetchone(self):return self.data[0] if self.data else None
+    def fetchall(self):return list(self.data)
 
 class FakeRec:
     def __init__(self):
@@ -31,6 +36,8 @@ class FakeRec:
         self.turn_status="completed"
         self.receipt_status=None
         self.fail_next=False
+        self.events=[]
+        self.message=None
     def db_connect(self):return FakeDB(self)
     def inspect_thread(self,db,thread):
         return {"turn_id":self.turn,"thread_id":thread,
@@ -120,6 +127,29 @@ class Integration(unittest.TestCase):
             self.assertEqual(self.run_tick(live=True),0)
         self.assertEqual(len(self.fake.calls),0)
         self.assertFalse((state.ROOT/"ledger.json").exists())
+
+    def test_new_client_user_goal_change_reawakens_blocked_goal_once(self):
+        goal=state.load(THREAD)
+        goal['status']='blocked'
+        goal['blocked_reason']='Prior browser maintenance awaits explicit approval'
+        goal['updated_at']=iso(-500)
+        goal['enrolled_at']=iso(-500)  # Synthetic user event must follow enrollment.
+        state.write(state.path(THREAD),goal)
+        msgid='aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa'
+        self.fake.events=[dict(occurred_at=iso(-150),payload_json=json.dumps({'messageId':msgid}))]
+        self.fake.message=dict(message_id=msgid,created_at=iso(-150),
+            text='Please deliver a safe standalone alpha before production hardening')
+        self.assertEqual(self.run_tick(live=True),0)
+        updated=state.load(THREAD)
+        self.assertEqual(updated['status'],'active')
+        self.assertEqual(len(updated['intent_sync']['pending']),1)
+        self.assertEqual(len(updated['tasks']),2)
+        legacy=next(t for t in updated['tasks'] if t['id']=='legacy-blocker')
+        self.assertEqual(legacy['state'],'blocked')
+        self.assertIn('approval',legacy['blocker'])
+        self.assertEqual(len(self.fake.calls),1)
+        self.run_tick(live=True)
+        self.assertEqual(len(self.fake.calls),1)
 
     def test_dry_run_does_not_persist_or_send(self):
         self.run_tick(live=False)
