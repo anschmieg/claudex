@@ -167,10 +167,18 @@ def inspect_thread(c, thread_id):
         for key in ("message","error","reason","detail"):
             val=data.get(key) if isinstance(data,dict) else None
             if isinstance(val,str):texts.append(val[:1024])
-    if info["last_error"]:texts.append(str(info["last_error"])[:1024])
-    info["error_class"]=next((kind for text in texts if (kind:=classify_error(text))!="unknown"),"unknown")
+    # `projection_thread_sessions.last_error` can remain set after a prior
+    # failure. Never mistake that stale session-level error for evidence that
+    # this *particular* failed turn is recoverable.
+    kinds={classify_error(text) for text in texts}
+    info["error_class"]=("blocked" if "blocked" in kinds else
+                         "transient" if "transient" in kinds else "unknown")
+    # Stopping a provider explicitly is just as intentional as interrupting a
+    # turn. Neither is a crash-recovery signal, even when the provider later
+    # appears stopped and the turn has remained unprojected for a while.
     info["interrupted"]=bool(c.execute("""SELECT 1 FROM orchestration_events
-      WHERE stream_id=? AND event_type='thread.turn-interrupt-requested'
+      WHERE stream_id=? AND event_type IN (
+        'thread.turn-interrupt-requested','thread.session-stop-requested')
       AND occurred_at>=? LIMIT 1""",(thread_id,info["requested_at"] or "")).fetchone())
     activity=c.execute("SELECT max(created_at) FROM projection_thread_activities WHERE thread_id=?",(thread_id,)).fetchone()
     info["last_activity_at"]=activity[0] if activity else None
@@ -242,6 +250,8 @@ def choose_action(c,goal,state,now):
     info=inspect_thread(c,goal["thread_id"])
     status=safe_snapshot(info,goal,now)
     active=state.get("intent")
+    if info and state.get("blocked_failed_turn_id")==info["turn_id"]:
+        return "blocked_rejected_command",info
     if not active and info and state.get("last_dispatched_failed_turn")==info["turn_id"]:
         return "already_dispatched",info
     if active:
@@ -252,6 +262,11 @@ def choose_action(c,goal,state,now):
             return "already_accepted",info
         if message_exists(c,active["message_id"]):
             return "already_accepted",info
+        # Check the authoritative receipt first, then honor transport backoff
+        # before attempting the SAME idempotent command after ambiguity.
+        next_time=parse_time(state.get("next_eligible_at"))
+        if next_time and now<next_time:
+            return "backoff",info
         # Never resend an ambiguous command if the original errored turn has
         # been superseded, or if someone resumed the conversation themselves.
         if not info or info["turn_id"]!=active["failed_turn_id"]:
@@ -350,6 +365,9 @@ def process(config,ledger,c,now,live):
             if state.get("intent"):
                 if action=="already_accepted":
                     state["attempts"]=max(state.get("attempts",0),state["intent"]["attempt"])
+                    state.pop("next_eligible_at",None)
+                if action=="blocked_receipt":
+                    state["blocked_failed_turn_id"]=state["intent"]["failed_turn_id"]
                 state["last_intent"]=state["intent"]["command_id"]
                 state["intent"]=None
                 if action=="already_accepted":
@@ -447,6 +465,7 @@ def run_once(live=False):
                 state["attempts"]=state.get("attempts",0)+1
                 state["last_dispatched_failed_turn"]=intent["failed_turn_id"]
                 state["last_dispatch_at"]=timestamp()
+                state.pop("next_eligible_at",None)
                 state["intent"]=None
                 atomic_json(BASE/"ledger.json",ledger)
                 emit("resumed_once",thread_suffix=thread[-8:],attempt=state["attempts"])
@@ -455,7 +474,8 @@ def run_once(live=False):
                 # retry, never start a new independent turn from that failure.
                 emit("dispatch_deferred",thread_suffix=thread[-8:],
                      error_type=type(error).__name__)
-                state["next_eligible_at"]=(dt.datetime.now(dt.timezone.utc)+dt.timedelta(seconds=RETRY_WAIT_SECONDS[0])).isoformat()
+                delay=RETRY_WAIT_SECONDS[min(max(0,int(intent["send_attempts"])-1),len(RETRY_WAIT_SECONDS)-1)]
+                state["next_eligible_at"]=(dt.datetime.now(dt.timezone.utc)+dt.timedelta(seconds=delay)).isoformat()
                 atomic_json(BASE/"ledger.json",ledger)
         return 0
 

@@ -73,6 +73,23 @@ class RecoveryTests(unittest.TestCase):
         self.assertEqual(rc.process({"goals":[self.goal]},ledger,self.db,NOW,True),[])
         self.assertIsNone(self.state["intent"])
         self.assertEqual(self.decision(),"already_dispatched")
+    def test_rejected_receipt_blocks_all_retries_for_same_failed_turn(self):
+        intent=rc.make_intent(THREAD,self.failturn,1)
+        self.state["intent"]=intent
+        self.db.execute("insert into orchestration_command_receipts values (?,?)",
+            (intent["command_id"],"rejected"))
+        ledger={"threads":{THREAD:self.state}}
+        self.assertEqual(rc.process({"goals":[self.goal]},ledger,self.db,NOW,True),[])
+        self.assertIsNone(self.state["intent"])
+        self.assertEqual(self.state["blocked_failed_turn_id"],self.failturn)
+        self.assertEqual(self.decision(),"blocked_rejected_command")
+        self.assertEqual(rc.process({"goals":[self.goal]},ledger,self.db,NOW,True),[])
+
+    def test_explicit_t3_session_stop_blocks_orphan_resume(self):
+        self.db.execute("insert into orchestration_events values (?,?,?)",
+            (THREAD,"thread.session-stop-requested",at(-150)))
+        self.assertEqual(self.decision(),"user_interrupt")
+
     def test_old_error_never_retried(self):
         self.goal["enrolled_at"]=at(-60)
         self.assertEqual(self.decision(),"pre_enrollment")
@@ -102,6 +119,18 @@ class RecoveryTests(unittest.TestCase):
         self.db.execute("update projection_thread_activities set payload_json=?",
             (json.dumps({"message":"HTTP 403 forbidden: user approval required"}),))
         self.assertEqual(self.decision(),"not_transient")
+    def test_blocked_error_dominates_retryable_gateway_error(self):
+        self.db.execute("insert into projection_thread_activities values (?,?,?,?,?)",
+            (THREAD,self.failturn,"runtime.error",at(-110),
+             json.dumps({"message":"HTTP 403 forbidden: explicit approval required"})))
+        self.assertEqual(self.decision(),"not_transient")
+
+    def test_stale_session_level_error_not_used_as_turn_evidence(self):
+        self.db.execute("delete from projection_thread_activities where thread_id=?",(THREAD,))
+        self.db.execute("update projection_thread_sessions set last_error=? where thread_id=?",
+            ("HTTP 503 service unavailable",THREAD))
+        self.assertEqual(self.decision(),"not_transient")
+
     def test_unknown_failure_not_retried(self):
         self.db.execute("update projection_thread_activities set payload_json=?",
             (json.dumps({"message":"Unknown mysterious provider condition"}),))
@@ -125,6 +154,27 @@ class RecoveryTests(unittest.TestCase):
         self.db.execute("insert into projection_thread_messages values (?,?,?,?)",
             (intent["message_id"],THREAD,"user",at(-15)))
         self.assertEqual(self.decision(),"already_accepted")
+    def test_pending_retry_honors_backoff_before_sending(self):
+        self.state["intent"]=rc.make_intent(THREAD,self.failturn,1)
+        self.state["intent"]["send_attempts"]=1
+        self.state["next_eligible_at"]=at(90)
+        self.assertEqual(self.decision(),"backoff")
+        ledger={"threads":{THREAD:self.state}}
+        self.assertEqual(rc.process({"goals":[self.goal]},ledger,self.db,NOW,True),[])
+        self.state["next_eligible_at"]=at(-1)
+        self.assertEqual(self.decision(),"resend_same_id")
+
+    def test_accepted_receipt_clears_transport_backoff(self):
+        intent=rc.make_intent(THREAD,self.failturn,1)
+        self.state["intent"]=intent
+        self.state["next_eligible_at"]=at(100)
+        self.db.execute("insert into orchestration_command_receipts values (?,?)",
+            (intent["command_id"],"accepted"))
+        self.assertEqual(self.decision(),"already_accepted")
+        ledger={"threads":{THREAD:self.state}}
+        self.assertEqual(rc.process({"goals":[self.goal]},ledger,self.db,NOW,True),[])
+        self.assertNotIn("next_eligible_at",self.state)
+
     def test_command_ids_are_deterministic_and_distinct(self):
         a=rc.make_intent(THREAD,self.failturn,1)
         b=rc.make_intent(THREAD,self.failturn,1)
