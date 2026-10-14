@@ -1,0 +1,14 @@
+[Unit]
+Description=Check evidence-gated goals after T3 Claudex turns finish
+After=claudex-recovery.timer
+
+[Timer]
+OnBootSec=3min
+OnUnitInactiveSec=90s
+AccuracySec=10s
+RandomizedDelaySec=5s
+Unit=claudex-governor.service
+Persistent=true
+
+[Install]
+WantedBy=timers.target

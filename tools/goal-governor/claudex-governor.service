@@ -1,0 +1,22 @@
+[Unit]
+Description=Claudex durable goal governor (evidence-gated automatic continuation)
+After=t3code.service claudex-recovery.service
+Wants=t3code.service
+ConditionPathExists=%h/.local/share/claudex/goal-governor/supervisor.py
+
+[Service]
+Type=oneshot
+WorkingDirectory=%h
+Environment=PYTHONDONTWRITEBYTECODE=1
+ExecStart=%h/.local/share/claudex/goal-governor/run-governor.sh --live
+UMask=0077
+TimeoutStartSec=45
+MemoryMax=512M
+CPUQuota=40%
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ReadWritePaths=%h/.local/state/claudex-governor %h/.t3/userdata
+
+[Install]
+WantedBy=default.target

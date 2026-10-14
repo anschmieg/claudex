@@ -1,0 +1,16 @@
+{
+  "description": "Inject only the active goal's bounded state at session start; never force a Stop-loop or dispatch work from a hook.",
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/scripts/session.py\"",
+            "timeout": 5
+          }
+        ]
+      }
+    ]
+  }
+}

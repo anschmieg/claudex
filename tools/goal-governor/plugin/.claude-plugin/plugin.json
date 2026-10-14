@@ -1,0 +1,9 @@
+{
+  "name": "goal-governor",
+  "displayName": "Durable Goal Governor",
+  "version": "0.1.0",
+  "description": "Evidence-gated long-running goals for T3 Code and Claudex, with independent recovery and continuation. No Claude Code or Claudex patches.",
+  "author": {
+    "name": "Claudex contributors"
+  }
+}
