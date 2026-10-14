@@ -48,12 +48,20 @@ fi
 sudo -n runuser -u "$TARGET_USER" -- env HOME="$TARGET_HOME" USER="$TARGET_USER" PATH=/usr/bin:/bin \
   python3 "$RUN_PY" --once
 
+# Ensure the exact runtime user can load the WebSocket client before a
+# background failure would need it; do not run the app with operator privileges.
+sudo -n runuser -u "$TARGET_USER" -- env HOME="$TARGET_HOME" USER="$TARGET_USER" PATH=/usr/bin:/bin \
+  python3 -c 'import websockets; print("T3_RECOVERY_WEBSOCKETS=PASS")'
+
 # Short-lived credential remains in local process memory; no token is logged.
 echo "Checking authenticated local T3 read endpoint..."
 sudo -n runuser -u "$TARGET_USER" -- env HOME="$TARGET_HOME" USER="$TARGET_USER" PATH=/usr/bin:/bin \
   python3 "$RUN_PY" --probe-auth
 
 sudo -n systemctl --machine="$TARGET_USER@.host" --user daemon-reload
+# Verify the same sandboxed oneshot that the timer will run. If this fails,
+# leave the timer disabled and preserve all T3 agent processes unmodified.
+sudo -n systemctl --machine="$TARGET_USER@.host" --user start claudex-recovery.service
 sudo -n systemctl --machine="$TARGET_USER@.host" --user enable --now claudex-recovery.timer
 sudo -n systemctl --machine="$TARGET_USER@.host" --user is-active claudex-recovery.timer
 echo "T3_CLAUDEX_RECOVERY_TIMER_ACTIVE=PASS"
