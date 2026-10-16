@@ -11,5 +11,15 @@ if [[ ! -x "$launcher" ]]; then
   printf 'claudex: install or repair the Claudex package, then retry.\n' >&2
   exit 127
 fi
+# Optional diagnostics only. Never modify user arguments or provider routing.
+# A missing or failed optional diagnostic must not break ordinary Claudex runs.
+if [[ "${CLAUDEX_EFFICIENCY:-off}" != off ]]; then
+  profile="$data_root/efficiency/profile.py"
+  if [[ -f "$profile" ]] && command -v python3 >/dev/null 2>&1; then
+    python3 "$profile" || true
+  else
+    printf 'claudex: efficiency profile not installed (run install.sh)\n' >&2
+  fi
+fi
 export CLAUDEX_MANAGED_WRAPPER=1
 exec "$launcher" "$@"

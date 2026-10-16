@@ -101,3 +101,6 @@ This is a fresh-history **public source and CI development repository**, not the
 Read BUILDING.md, THIRD_PARTY_LICENSES.md, NOTICE.md, SECURITY.md, and docs/SIWC_AND_SECURITY.md before contributing or reusing the code.
 
 **Not legal advice.** Licenses, service terms and trademarks can change. Publishing these notices cannot cure a service-terms violation, missing rights or an insecure authentication design. Independent legal and security review remains advisable before enabling the optional plan-backed runtime for other users.
+
+
+Optional efficiency diagnostics: see [docs/EFFICIENCY_PROFILE.md](docs/EFFICIENCY_PROFILE.md). Disabled by default (`CLAUDEX_EFFICIENCY=off`); advisory opt-in does not change model routing or enforce external spending caps.
