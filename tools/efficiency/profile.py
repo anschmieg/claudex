@@ -28,8 +28,8 @@ def positive(name, default):
 
 def profile():
     mode=os.environ.get('CLAUDEX_EFFICIENCY','off').lower()
-    if mode not in ('off','advisory','strict'):
-        raise ValueError('CLAUDEX_EFFICIENCY must be off, advisory or strict')
+    if mode not in ('off','advisory','strict','adaptive'):
+        raise ValueError('CLAUDEX_EFFICIENCY must be off, advisory, strict or adaptive')
     return dict(mode=mode,**{k:positive(k,v) for k,v in DEFAULTS.items()})
 
 def evaluate(config,context_tokens=None,idle_minutes=None,model_switch=False,

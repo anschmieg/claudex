@@ -118,6 +118,7 @@ mkdir -p "$BIN_ROOT" "$DATA_ROOT/patches" "$DATA_ROOT/transport-source" "$STATE_
 # Install isolated, disabled-by-default efficiency preflight alongside launcher.
 install -d -m 0700 "$DATA_ROOT/efficiency"
 install -m 0644 "$SCRIPT_DIR/tools/efficiency/profile.py" "$DATA_ROOT/efficiency/profile.py"
+install -m 0644 "$SCRIPT_DIR/tools/efficiency/native.py" "$DATA_ROOT/efficiency/native.py"
 install -m 0755 "$SCRIPT_DIR/claudex" "$DATA_ROOT/launcher"
 install -m 0755 "$SCRIPT_DIR/tools/codex-reasoning-defaults.py" "$DATA_ROOT/codex-reasoning-defaults.py"
 install -d -m 0755 "$DATA_ROOT/prompts"

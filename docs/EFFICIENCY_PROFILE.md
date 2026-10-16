@@ -30,3 +30,9 @@ The following opt-in environment variables set thresholds: `CLAUDEX_EFFICIENCY_S
 ## Validation and limitations
 
 `python3 tools/efficiency/test_profile.py` and `python3 tools/efficiency/test_wrapper.py` test disabled defaults, explicit controls, threshold warnings and standard launcher behavior. This release implements the advisory foundation, **not** automatic context estimation, provider quota introspection, enforcement of subagent budgets, live savings measurement, or durable session rotation. Implement those only after identifying reliable event sources and testable provider-specific enforcement points.
+
+## Adaptive native compaction (opt-in)
+
+Set `CLAUDEX_EFFICIENCY=adaptive` before launching Claudex to use Claude Code native auto-compaction after 64,000 context tokens, instead of 272,000. Configure `CLAUDEX_EFFICIENCY_TARGET_TOKENS` (16,000–272,000). For a known large-read task at launch, `CLAUDEX_EFFICIENCY_LARGE_READ=1` expands the budget (default 192,000; override with `CLAUDEX_EFFICIENCY_LARGE_READ_TOKENS`). Defaults and advisory mode remain unchanged. This does not automatically detect mid-turn reads.
+
+Idle pre-cache-expiry compaction is not implemented: no verified safe programmatic compact interface and cache TTL for the GPT backend were established. Do not claim an idle timer or savings.
