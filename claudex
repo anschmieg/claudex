@@ -1493,7 +1493,14 @@ launch() {
       chmod 600 "$CLAUDEX_MERGED_SETTINGS_FILE"
       adaptive_settings="$CLAUDEX_MERGED_SETTINGS_FILE"
     fi
-    python3 "$native_budget" --patch-settings "$settings" "$adaptive_settings" "$CLAUDE_CODE_AUTO_COMPACT_WINDOW" "$DATA_ROOT/efficiency/read_hook.py" || die "Cannot update adaptive Claude settings"
+    # Oversized Read denial is optional. Native auto-compaction is the default.
+    local -a read_guard_args=()
+    case "${CLAUDEX_EFFICIENCY_READ_GUARD:-off}" in
+      off) ;;
+      deny) read_guard_args=("$DATA_ROOT/efficiency/read_hook.py") ;;
+      *) die "CLAUDEX_EFFICIENCY_READ_GUARD must be off or deny" ;;
+    esac
+    python3 "$native_budget" --patch-settings "$settings" "$adaptive_settings" "$CLAUDE_CODE_AUTO_COMPACT_WINDOW" ${read_guard_args[@]+"${read_guard_args[@]}"} || die "Cannot update adaptive Claude settings"
     settings="$adaptive_settings"
   fi
 

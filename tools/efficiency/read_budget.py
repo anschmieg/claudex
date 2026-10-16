@@ -13,7 +13,7 @@ class Read:
     currently_used: int
 
 
-def target(read,normal=64000,expanded=192000,headroom=12000):
+def target(read,normal=384000,expanded=768000,headroom=32000):
     if not all(isinstance(n,int) and n>=0 for n in
                (read.estimated_tokens,read.currently_used,normal,expanded,headroom)):
         raise ValueError('invalid token estimate')

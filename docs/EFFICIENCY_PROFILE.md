@@ -33,17 +33,88 @@ The following opt-in environment variables set thresholds: `CLAUDEX_EFFICIENCY_S
 
 ## Adaptive native compaction (opt-in)
 
-Set `CLAUDEX_EFFICIENCY=adaptive` before launching Claudex to use Claude Code native auto-compaction after 64,000 context tokens, instead of 272,000. Configure `CLAUDEX_EFFICIENCY_TARGET_TOKENS` (16,000–272,000). For a known large-read task at launch, `CLAUDEX_EFFICIENCY_LARGE_READ=1` expands the budget (default 192,000; override with `CLAUDEX_EFFICIENCY_LARGE_READ_TOKENS`). Defaults and advisory mode remain unchanged. This does not automatically detect mid-turn reads.
+Set `CLAUDEX_EFFICIENCY=adaptive` before starting a **new** Claudex session.
+The installed Claude Code v2.1.294 supports
+`CLAUDE_CODE_AUTO_COMPACT_WINDOW` (100K–1M tokens) and a
+`[1m]` context suffix. **It does not expose supported arbitrary 256K/512K
+model-context variants.** The tiers below are therefore *compaction budgets*,
+not true per-model context capacities. Claudex still uses its existing
+1M-capable GPT routing. No runtime model switch or forced context expansion
+is claimed.
 
-Idle pre-cache-expiry compaction is not implemented: no verified safe programmatic compact interface and cache TTL for the GPT backend were established. Do not claim an idle timer or savings.
+| Opt-in budget tier | Nominal planning budget | Native compact threshold |
+| --- | ---: | ---: |
+| `small` | 256K | 192K |
+| `medium` (**default**) | 512K | 384K |
+| `large` | 1M | 768K |
 
-## Lifecycle controller prototype (not yet activated)
+Each threshold leaves nominal 25% headroom for reasoning and tool results,
+rather than attempting to use every available token. The 384K default is a
+conservative **starting hypothesis**, not an empirically optimized setting.
+It replaces the earlier 64K Claudex adaptive setting (which is below the
+client's documented 100K minimum); the existing **non-adaptive** Claudex
+configuration remains at 272K.
 
-`tools/efficiency/lifecycle.py` provides deterministic pre-expiry idle compaction eligibility: requires verified session ownership, known cache TTL, inactivity, no pending user interaction, no active tools, sufficient context, a safety buffer and a cooldown. It never issues `/compact` by itself; live dispatch remains disabled pending a trustworthy same-session API and atomic lease. `tools/efficiency/read_budget.py` selects expanded budgets for recognized large reads, but the running Claude Code process cannot be changed safely by rewriting its environment mid-turn. Dynamic expansion is not wired yet. Both components are covered by synthetic tests.
+Select `CLAUDEX_EFFICIENCY_CONTEXT_TIER=small|medium|large` before launch.
+`CLAUDEX_EFFICIENCY_TARGET_TOKENS` overrides the tier threshold with an
+integer from 100000 through 1000000. For known whole-file work at launch,
+`CLAUDEX_EFFICIENCY_LARGE_READ=1` raises the threshold to at least 768K
+(or the explicit `CLAUDEX_EFFICIENCY_LARGE_READ_TOKENS` value). These
+settings operate through the **session-private** Claude Code settings plus
+the launcher environment and do not alter stored conversation state.
 
+Example:
 
-## Adaptive Read hook (opt-in, active)
+```sh
+CLAUDEX_EFFICIENCY=adaptive CLAUDEX_EFFICIENCY_CONTEXT_TIER=medium claudex
+# For a new large-read session:
+CLAUDEX_EFFICIENCY=adaptive CLAUDEX_EFFICIENCY_LARGE_READ=1 claudex
+```
 
-Adaptive launches now attach a native Claude Code `PreToolUse` hook for `Read` to the **session-private** settings. If a file exceeds 160,000 bytes and the requested read has no explicit bounded range, the hook denies only that invocation and tells Claude Code to use `Read(offset=..., limit=150)`. Existing bounded reads, all other tool calls and permission settings pass unchanged. The hook does **not** expand an already running model context; this is preventive chunking. It does not introspect file contents or disclose the file path in diagnostic output. This is a conservative enforcement layer, not a verified automatic mid-turn window resize.
+### Large reads
 
-Idle cache-expiry compaction remains unactivated because Claude Code currently does not expose a documented, safe programmatic idle compaction dispatch interface. The lifecycle controller rejects attempts without verified ownership and TTL; enabling a blind timer would be unsafe.
+Adaptive mode **no longer denies whole-file `Read` calls by default**.
+A complete read can be cheaper and more informative than repeated restricted
+reads when the task needs the entire file. The old native PreToolUse read
+guard remains available only through
+`CLAUDEX_EFFICIENCY_READ_GUARD=deny`; the default is `off`.
+It denies unexpectedly large whole-file reads (160KB threshold) and
+requests chunks. This guard does *not* expand the context. Existing
+unbounded reads in a running session are not intercepted for tier expansion.
+
+`tools/efficiency/read_budget.py` is still a **prototype**: selecting an
+expanded target does not change a running Claude Code session. Actual live
+tier switching requires a verified Claude Code model-metadata mechanism and
+session-owner coordination; an arbitrary `[256k]` or `[512k]` suffix
+must not be treated as native support.
+
+### Deliberate compaction and cost
+
+Interactive Claude Code can execute `/compact`; an Agent SDK session owner
+can issue a supported slash command and observe a `compact_boundary`.
+Neither grants Claudex authority to inject `/compact` into an active T3
+Code or interactive session. No autonomous idle compaction is enabled: the
+owner-specific atomic lock, activity/approval checks, provider cache TTL and
+verified dispatch/completion are still missing. The existing
+`tools/efficiency/lifecycle.py` remains a fail-closed offline prototype.
+Do not run timer-based compaction on incomplete information.
+
+### Verification and rollout
+
+```sh
+python3 -m unittest discover -s tools/efficiency -p 'test_*.py' -v
+python3 tools/test-prompt-rules.py
+python3 tools/audit-public-source.py
+bash -n claudex
+```
+
+The budget policy, configuration writes and rollback are covered by tests.
+**Real live auto-compaction thresholds, task quality, provider cache reuse,
+large-context coding, model switching and cost savings are not yet
+measured.** Do not infer a cost reduction from selecting a smaller threshold.
+
+To roll back for a **new** session, unset `CLAUDEX_EFFICIENCY` or set it
+to `off` (original 272K non-adaptive configuration). An already-running
+Claude Code process keeps its launch-time settings; no restart or mutation
+of existing sessions is attempted. Reinstall only when ready to deploy
+the committed source.
