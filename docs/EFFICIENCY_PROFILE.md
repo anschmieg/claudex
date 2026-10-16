@@ -36,3 +36,7 @@ The following opt-in environment variables set thresholds: `CLAUDEX_EFFICIENCY_S
 Set `CLAUDEX_EFFICIENCY=adaptive` before launching Claudex to use Claude Code native auto-compaction after 64,000 context tokens, instead of 272,000. Configure `CLAUDEX_EFFICIENCY_TARGET_TOKENS` (16,000–272,000). For a known large-read task at launch, `CLAUDEX_EFFICIENCY_LARGE_READ=1` expands the budget (default 192,000; override with `CLAUDEX_EFFICIENCY_LARGE_READ_TOKENS`). Defaults and advisory mode remain unchanged. This does not automatically detect mid-turn reads.
 
 Idle pre-cache-expiry compaction is not implemented: no verified safe programmatic compact interface and cache TTL for the GPT backend were established. Do not claim an idle timer or savings.
+
+## Lifecycle controller prototype (not yet activated)
+
+`tools/efficiency/lifecycle.py` provides deterministic pre-expiry idle compaction eligibility: requires verified session ownership, known cache TTL, inactivity, no pending user interaction, no active tools, sufficient context, a safety buffer and a cooldown. It never issues `/compact` by itself; live dispatch remains disabled pending a trustworthy same-session API and atomic lease. `tools/efficiency/read_budget.py` selects expanded budgets for recognized large reads, but the running Claude Code process cannot be changed safely by rewriting its environment mid-turn. Dynamic expansion is not wired yet. Both components are covered by synthetic tests.
