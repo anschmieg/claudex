@@ -1574,9 +1574,39 @@ launch() {
     append_prompt_args=(--append-system-prompt "$accumulated_append")
   fi
 
+  # 2.1.296+ supports per-subagent autoCompactWindow in --agents. Use only
+  # unchanged app-owned definitions; never rewrite users' ~/.claude/agents.
+  # A caller's explicit --agents has priority (not safe to merge blindly).
+  local -a worker_agents_args=()
+  if [[ "${CLAUDEX_EFFICIENCY:-off}" == adaptive ]]; then
+    case "${CLAUDEX_EFFICIENCY_WORKER_COMPACTION:-auto}" in
+      off) ;;
+      auto)
+        local caller_agents=0 argument version agent_json
+        for argument in ${forwarded_args[@]+"${forwarded_args[@]}"}; do
+          case "$argument" in --agents|--agents=*) caller_agents=1 ;; esac
+        done
+        if [[ "$caller_agents" == 0 ]]; then
+          local worker_helper="$DATA_ROOT/efficiency/agents.py"
+          [[ -f "$worker_helper" ]] || die "adaptive worker helper missing; reinstall Claudex"
+          version="$(claude --version 2>/dev/null || true)"
+          local -a budget_args=()
+          if [[ -n "${CLAUDEX_EFFICIENCY_WORKER_TARGET_TOKENS:-}" ]]; then
+            budget_args=(--worker-tokens "$CLAUDEX_EFFICIENCY_WORKER_TARGET_TOKENS")
+          fi
+          agent_json="$(python3 "$worker_helper" "$AGENTS_DIR" "$DATA_ROOT/agents-owned" \
+            "$CLAUDE_CODE_AUTO_COMPACT_WINDOW" "$version" ${budget_args[@]+"${budget_args[@]}"} )" || die "invalid adaptive worker configuration"
+          [[ -z "$agent_json" ]] || worker_agents_args=(--agents "$agent_json")
+        fi
+        ;;
+      *) die "CLAUDEX_EFFICIENCY_WORKER_COMPACTION must be auto or off" ;;
+    esac
+  fi
+
   # Do not exec: we need to tear down an ephemeral runtime after Claude exits.
   set +e
   claude ${fast_args[@]+"${fast_args[@]}"} --settings "$settings" --model "$selected_model" \
+    ${worker_agents_args[@]+"${worker_agents_args[@]}"} \
     ${default_effort_args[@]+"${default_effort_args[@]}"} \
     ${append_prompt_args[@]+"${append_prompt_args[@]}"} ${merged_cli_args[@]+"${merged_cli_args[@]}"}
   claude_rc=$?

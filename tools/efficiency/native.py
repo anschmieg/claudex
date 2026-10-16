@@ -7,14 +7,16 @@ suffix. Its auto-compact env setting supports 100K–1M tokens.
 """
 import json
 import os
+import shlex
 import sys
 from pathlib import Path
 
 DEFAULT = 272000  # Preserve non-adaptive behavior exactly.
 MINIMUM = 100000
 MAXIMUM = 1000000
-# Leave 25% of the *nominal tier* for tools/reasoning; experimentally tune later.
-TIERS = {'small': 192000, 'medium': 384000, 'large': 768000}
+# These are launch-time auto-compaction thresholds, not true model windows.
+# Medium (256K) is deliberately below the original non-adaptive 272K.
+TIERS = {'small': 192000, 'medium': 256000, 'large': 768000}
 
 
 def _tokens(value, name):
@@ -55,6 +57,10 @@ def patch_settings(source, destination, budget, read_hook=None):
         raise ValueError('Claude settings missing env object')
     _tokens(str(budget), 'budget')
     obj['env']['CLAUDE_CODE_AUTO_COMPACT_WINDOW'] = str(budget)
+    # Claude Code >=2.1.290 may otherwise compact an idle 200K+ session
+    # against Anthropic's 1-hour TTL, which is not established for GPT.
+    # Avoid uncontrolled background model activity in opted-in sessions.
+    obj['idleCompaction'] = False
     if read_hook:
         hook = Path(read_hook)
         if not hook.is_file():
@@ -67,7 +73,7 @@ def patch_settings(source, destination, budget, read_hook=None):
             raise ValueError('PreToolUse hooks must be an array')
         pre.append({
             'matcher': 'Read',
-            'hooks': [{'type': 'command', 'command': 'python3 ' + str(hook), 'timeout': 5}],
+            'hooks': [{'type': 'command', 'command': 'python3 ' + shlex.quote(str(hook)), 'timeout': 5}],
         })
     Path(destination).write_text(json.dumps(obj))
 

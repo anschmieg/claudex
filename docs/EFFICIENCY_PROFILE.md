@@ -45,12 +45,12 @@ is claimed.
 | Opt-in budget tier | Nominal planning budget | Native compact threshold |
 | --- | ---: | ---: |
 | `small` | 256K | 192K |
-| `medium` (**default**) | 512K | 384K |
+| `medium` (**default**) | 512K | 256K |
 | `large` | 1M | 768K |
 
-Each threshold leaves nominal 25% headroom for reasoning and tool results,
-rather than attempting to use every available token. The 384K default is a
-conservative **starting hypothesis**, not an empirically optimized setting.
+The 256K medium default is deliberately below the previous non-adaptive
+272K threshold (384K was 41% higher). It is a **trial value**, not a
+measured efficiency optimum; the tiers are budgets, not actual model windows.
 It replaces the earlier 64K Claudex adaptive setting (which is below the
 client's documented 100K minimum); the existing **non-adaptive** Claudex
 configuration remains at 272K.
@@ -93,7 +93,9 @@ must not be treated as native support.
 Interactive Claude Code can execute `/compact`; an Agent SDK session owner
 can issue a supported slash command and observe a `compact_boundary`.
 Neither grants Claudex authority to inject `/compact` into an active T3
-Code or interactive session. No autonomous idle compaction is enabled: the
+Code or interactive session. Adaptive sessions explicitly set `idleCompaction: false` in private
+settings to avoid applying Anthropic one-hour cache TTL assumptions to the
+GPT backend. No autonomous idle compaction is enabled: the
 owner-specific atomic lock, activity/approval checks, provider cache TTL and
 verified dispatch/completion are still missing. The existing
 `tools/efficiency/lifecycle.py` remains a fail-closed offline prototype.
@@ -118,3 +120,62 @@ to `off` (original 272K non-adaptive configuration). An already-running
 Claude Code process keeps its launch-time settings; no restart or mutation
 of existing sessions is attempted. Reinstall only when ready to deploy
 the committed source.
+
+### Adversarial review improvements (2026-10-16)
+
+**Native worker budgets (Claude Code 2.1.296+):** Upstream
+[v2.1.296](https://github.com/anthropics/claude-code/releases/tag/v2.1.296)
+supports a per-subagent `autoCompactWindow` property in agent frontmatter
+and `--agents` JSON, plus the `Read(allow_large)` escape hatch.
+In adaptive mode, Claudex now supplies `--agents` overrides only for
+**unchanged, Claudex-owned** definitions, with the original prompts,
+models and effort settings and a default worker budget of 192K tokens
+(capped at the coordinator threshold). No user/agent files are mutated.
+Custom, project-scoped, edited, symlinked or unowned definitions are left alone. An
+explicit caller `--agents` flag is never overwritten or merged. Installed
+Claude Code 2.1.294 retains its current worker behavior; it cannot use
+this feature. This support is unit-tested but awaits a real >=2.1.296
+CLI and T3 Code integration test.
+
+Set `CLAUDEX_EFFICIENCY_WORKER_COMPACTION=off` to suppress worker overrides,
+or `CLAUDEX_EFFICIENCY_WORKER_TARGET_TOKENS` to choose a worker budget
+between 100K and the coordinator threshold. The default is `auto`
+(version-gated). These are compaction thresholds, not strict ceilings.
+
+**Idle compaction:** Upstream
+[v2.1.299](https://github.com/anthropics/claude-code/releases/tag/v2.1.299)
+introduced/documented terminal idle compaction for Anthropic's one-hour
+prompt cache. The GPT backend cache TTL remains unverified; adaptive
+launches therefore explicitly disable idle compaction only in their
+session-private settings. No untrusted background timers or session-owner
+writes are enabled.
+
+**Read-budget correctness:** `read_budget.py` rejects an estimated read
+that exceeds its expanded budget rather than representing it as
+accommodated. It remains an offline planning prototype, not live context
+expansion. The optional legacy Read hook now quotes paths containing
+spaces or shell metacharacters.
+
+**Compare observed usage:** Record the same coding workload with
+`--output-format stream-json --verbose` at 192K, 256K, 272K and
+384K (same model, effort, repository, task and permissions). Protect raw
+captures: they may contain private conversation and tool data. Then run:
+
+```sh
+python3 tools/efficiency/compare_telemetry.py \
+  baseline=baseline.jsonl small=small.jsonl \
+  medium=medium.jsonl old_adaptive=384k.jsonl
+```
+
+The comparator emits *only aggregate observed* token counters, cache
+coverage, and compact-boundary counts. It deduplicates repeated assistant
+message IDs and discards all text. These counters alone **do not** prove
+provider charges, savings, task quality, or cached-context integrity.
+Compare task results and timing separately, and validate actual billing
+and provider cache behavior before endorsing a threshold.
+
+**Release gate:** All tests and audits must pass, followed by real
+opt-in CLI and T3 integration tests on 2.1.294 and staged >=2.1.296,
+including `Read(allow_large)`, subagent compaction, existing user
+`--agents`, authentication, and session resumes. No running services
+are changed or restarted by this branch.
