@@ -40,3 +40,10 @@ Idle pre-cache-expiry compaction is not implemented: no verified safe programmat
 ## Lifecycle controller prototype (not yet activated)
 
 `tools/efficiency/lifecycle.py` provides deterministic pre-expiry idle compaction eligibility: requires verified session ownership, known cache TTL, inactivity, no pending user interaction, no active tools, sufficient context, a safety buffer and a cooldown. It never issues `/compact` by itself; live dispatch remains disabled pending a trustworthy same-session API and atomic lease. `tools/efficiency/read_budget.py` selects expanded budgets for recognized large reads, but the running Claude Code process cannot be changed safely by rewriting its environment mid-turn. Dynamic expansion is not wired yet. Both components are covered by synthetic tests.
+
+
+## Adaptive Read hook (opt-in, active)
+
+Adaptive launches now attach a native Claude Code `PreToolUse` hook for `Read` to the **session-private** settings. If a file exceeds 160,000 bytes and the requested read has no explicit bounded range, the hook denies only that invocation and tells Claude Code to use `Read(offset=..., limit=150)`. Existing bounded reads, all other tool calls and permission settings pass unchanged. The hook does **not** expand an already running model context; this is preventive chunking. It does not introspect file contents or disclose the file path in diagnostic output. This is a conservative enforcement layer, not a verified automatic mid-turn window resize.
+
+Idle cache-expiry compaction remains unactivated because Claude Code currently does not expose a documented, safe programmatic idle compaction dispatch interface. The lifecycle controller rejects attempts without verified ownership and TTL; enabling a blind timer would be unsafe.

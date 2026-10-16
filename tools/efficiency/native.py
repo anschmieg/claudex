@@ -29,7 +29,7 @@ def window(env=None):
         target=max(target,min(int(raw),MAXIMUM))
     return target
 
-def patch_settings(source,destination,budget):
+def patch_settings(source,destination,budget,read_hook=None):
     import json
     from pathlib import Path
     src=Path(source)
@@ -37,12 +37,20 @@ def patch_settings(source,destination,budget):
     if not isinstance(obj,dict) or not isinstance(obj.get('env'),dict):
         raise ValueError('Claude settings missing env object')
     obj['env']['CLAUDE_CODE_AUTO_COMPACT_WINDOW']=str(budget)
+    if read_hook:
+        if not Path(read_hook).is_file():raise ValueError('adaptive read hook missing')
+        # Hook denies only unexpected large whole-file reads; it never approves
+        # tools, changes permissions, or modifies existing hook definitions.
+        obj.setdefault('hooks',{}).setdefault('PreToolUse',[]).append({
+            'matcher':'Read',
+            'hooks':[{'type':'command','command':'python3 '+str(Path(read_hook)),'timeout':5}]
+        })
     Path(destination).write_text(json.dumps(obj))
 
 if __name__=='__main__':
-    if len(sys.argv)==5 and sys.argv[1]=='--patch-settings':
+    if len(sys.argv) in (5,6) and sys.argv[1]=='--patch-settings':
         try:
-            patch_settings(sys.argv[2],sys.argv[3],int(sys.argv[4]));sys.exit(0)
+            patch_settings(sys.argv[2],sys.argv[3],int(sys.argv[4]),sys.argv[5] if len(sys.argv)==6 else None);sys.exit(0)
         except (ValueError,OSError) as exc:
             print('claudex native efficiency: '+str(exc),file=sys.stderr);sys.exit(2)
     try:print(window())

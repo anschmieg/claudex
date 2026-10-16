@@ -1493,7 +1493,7 @@ launch() {
       chmod 600 "$CLAUDEX_MERGED_SETTINGS_FILE"
       adaptive_settings="$CLAUDEX_MERGED_SETTINGS_FILE"
     fi
-    python3 "$native_budget" --patch-settings "$settings" "$adaptive_settings" "$CLAUDE_CODE_AUTO_COMPACT_WINDOW" || die "Cannot update adaptive Claude settings"
+    python3 "$native_budget" --patch-settings "$settings" "$adaptive_settings" "$CLAUDE_CODE_AUTO_COMPACT_WINDOW" "$DATA_ROOT/efficiency/read_hook.py" || die "Cannot update adaptive Claude settings"
     settings="$adaptive_settings"
   fi
 
