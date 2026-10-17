@@ -29,6 +29,12 @@ jobs:
           python3 -m py_compile tools/test-launcher-concurrency.py tools/test-local-auth.py
       - name: Test launcher without building native binaries
         run: python3 tools/test-launcher-port-guard.py
+      - name: Mandatory native efficiency and token-budget contract
+        shell: bash
+        run: |
+          export PYTHONDONTWRITEBYTECODE=1
+          python3 -m unittest discover -s tools/efficiency -p 'test_*.py' -v
+          python3 tools/efficiency/launcher_integration_probe.py
 
   native-rust:
     name: ${{ matrix.label }}
@@ -82,6 +88,31 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: '22'
+      # Real first-request token gate, run once on Linux x86_64: pinned Claude
+      # Code -> patched Shunt -> fake localhost Responses. No paid inference.
+      # Both absolute request budget and optimized-vs-off regression must pass.
+      - name: Set up pinned Python for token accounting
+        if: matrix.arch == 'linux-x86_64'
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Stage pinned synthetic client and tokenizer
+        if: matrix.arch == 'linux-x86_64'
+        shell: bash
+        run: |
+          python3 -m pip install 'tiktoken==0.12.0'
+          npm install --prefix "$RUNNER_TEMP/claudex-token-qa" \
+            --no-save --ignore-scripts --no-audit --no-fund \
+            '@anthropic-ai/claude-code@2.1.300'
+          test -x "$RUNNER_TEMP/claudex-token-qa/node_modules/@anthropic-ai/claude-code-linux-x64/claude"
+      - name: Enforce actual translated request token budget and invariants
+        if: matrix.arch == 'linux-x86_64'
+        shell: bash
+        run: |
+          PYTHONDONTWRITEBYTECODE=1 python3 tools/efficiency/request_token_gate.py \
+            --shunt "bin/${{ matrix.arch }}/shunt" \
+            --claude "$RUNNER_TEMP/claudex-token-qa/node_modules/@anthropic-ai/claude-code-linux-x64/claude" \
+            --rules prompt-rules
       - name: Test independent OS credential adapters without the noncommercial DevKit
         shell: bash
         run: node --test source/siwc-helper/keychain-store.test.mjs source/siwc-helper/secret-service-store.test.mjs

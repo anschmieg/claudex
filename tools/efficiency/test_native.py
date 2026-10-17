@@ -53,17 +53,30 @@ class NativeTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             source, output = Path(tmp)/'source.json', Path(tmp)/'output.json'
             source.write_text(json.dumps({
-                'env': {'USER_KEEP': 'yes'}, 'hooks': {'Stop': []},
-                'idleCompaction': True,
+                'env': {'USER_KEEP': 'yes',
+                        'CLAUDE_CODE_AUTO_COMPACT_WINDOW': '272000'},
+                'hooks': {'Stop': []}, 'idleCompaction': True,
             }))
             patch_settings(source, output, window(self.adaptive()))
             patched = json.loads(output.read_text())
-            self.assertEqual(patched['env']['CLAUDE_CODE_AUTO_COMPACT_WINDOW'], '256000')
+            self.assertEqual(patched['autoCompactWindow'], 256000)
+            self.assertNotIn('CLAUDE_CODE_AUTO_COMPACT_WINDOW', patched['env'])
             self.assertEqual(patched['env']['USER_KEEP'], 'yes')
             self.assertEqual(patched['hooks'], {'Stop': []})
             self.assertIs(patched['idleCompaction'], False)
             # Never rewrite the persistent source on disk.
             self.assertIs(json.loads(source.read_text())['idleCompaction'], True)
+
+    def test_explicit_sdk_window_preserved(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            source, output = Path(tmp)/'source.json', Path(tmp)/'patched.json'
+            source.write_text(json.dumps({'env': {
+                'CLAUDE_CODE_AUTO_COMPACT_WINDOW': '272000'},
+                'autoCompactWindow': 512000}))
+            patch_settings(source, output, 256000)
+            data = json.loads(output.read_text())
+            self.assertEqual(data['autoCompactWindow'], 512000)
+            self.assertNotIn('CLAUDE_CODE_AUTO_COMPACT_WINDOW', data['env'])
 
     def test_legacy_hook_executes_at_path_with_spaces_metachars(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -103,8 +116,9 @@ class NativeTests(unittest.TestCase):
                                 str(source), str(output), '256000'],
                                capture_output=True, text=True)
             self.assertEqual(p.returncode, 0, p.stderr)
-            self.assertEqual(json.loads(output.read_text())['env']
-                             ['CLAUDE_CODE_AUTO_COMPACT_WINDOW'], '256000')
+            self.assertEqual(json.loads(output.read_text())['autoCompactWindow'], 256000)
+            self.assertNotIn('CLAUDE_CODE_AUTO_COMPACT_WINDOW',
+                             json.loads(output.read_text())['env'])
 
 
 if __name__ == '__main__':

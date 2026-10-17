@@ -1,5 +1,9 @@
 # Claudex adaptive-efficiency QA — 2026-10-16
 
+**Historical QA record, superseded on 2026-10-17.**
+The generated worker `--agents` overrides were removed; see
+`docs/EFFICIENCY_PROFILE.md` for the current native-first design.
+
 Tested source: `1c67212`, branch
 `review/adaptive-efficiency-hardening-20261016`.
 All tests use synthetic credentials. **No actual GPT/Anthropic inference,

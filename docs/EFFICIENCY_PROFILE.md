@@ -121,61 +121,38 @@ Claude Code process keeps its launch-time settings; no restart or mutation
 of existing sessions is attempted. Reinstall only when ready to deploy
 the committed source.
 
-### Adversarial review improvements (2026-10-16)
+### Native-first correction — 2026-10-17
 
-**Native worker budgets (Claude Code 2.1.296+):** Upstream
-[v2.1.296](https://github.com/anthropics/claude-code/releases/tag/v2.1.296)
-supports a per-subagent `autoCompactWindow` property in agent frontmatter
-and `--agents` JSON, plus the `Read(allow_large)` escape hatch.
-In adaptive mode, Claudex now supplies `--agents` overrides only for
-**unchanged, Claudex-owned** definitions, with the original prompts,
-models and effort settings and a default worker budget of 192K tokens
-(capped at the coordinator threshold). No user/agent files are mutated.
-Custom, project-scoped, edited, symlinked or unowned definitions are left alone. An
-explicit caller `--agents` flag is never overwritten or merged. Installed
-Claude Code 2.1.294 retains its current worker behavior; it cannot use
-this feature. This support is unit-tested but awaits a real >=2.1.296
-CLI and T3 Code integration test.
+The earlier session-generated `--agents` overrides and `agents.py` have
+been removed. They could shadow recursively discovered or user-defined agents,
+and a global compaction environment variable defeated their worker budgets.
 
-Set `CLAUDEX_EFFICIENCY_WORKER_COMPACTION=off` to suppress worker overrides,
-or `CLAUDEX_EFFICIENCY_WORKER_TARGET_TOKENS` to choose a worker budget
-between 100K and the coordinator threshold. The default is `auto`
-(version-gated). These are compaction thresholds, not strict ceilings.
+Adaptive launches now remove `CLAUDE_CODE_AUTO_COMPACT_WINDOW` from the
+process and private settings environment, set native `autoCompactWindow`,
+and pass `--autocompact` for the coordinator (unless overridden by caller).
+Non-adaptive sessions retain their 272K environment default. The configured
+native agent definitions and their frontmatter are never modified or
+duplicated by Claudex. Separate 192K worker compaction is **not claimed**.
+The former worker-specific Claudex environment controls are obsolete
+and now produce a warning if explicitly set.
 
-**Idle compaction:** Upstream
-[v2.1.299](https://github.com/anthropics/claude-code/releases/tag/v2.1.299)
-introduced/documented terminal idle compaction for Anthropic's one-hour
-prompt cache. The GPT backend cache TTL remains unverified; adaptive
-launches therefore explicitly disable idle compaction only in their
-session-private settings. No untrusted background timers or session-owner
-writes are enabled.
+Direct `--agent` sessions use their selected agent's model unless the caller
+explicitly supplies `--model`. This preserves the existing model hierarchy.
 
-**Read-budget correctness:** `read_budget.py` rejects an estimated read
-that exceeds its expanded budget rather than representing it as
-accommodated. It remains an offline planning prototype, not live context
-expansion. The optional legacy Read hook now quotes paths containing
-spaces or shell metacharacters.
+### Mandatory efficiency CI
 
-**Compare observed usage:** Record the same coding workload with
-`--output-format stream-json --verbose` at 192K, 256K, 272K and
-384K (same model, effort, repository, task and permissions). Protect raw
-captures: they may contain private conversation and tool data. Then run:
+Fast CI runs the native efficiency unit suite plus real launcher-function
+integration tests. Linux x86-64 native CI also runs pinned Claude Code 2.1.300
+through patched Shunt into a local fake Responses backend, comparing
+`CLAUDEX_PROMPT_MODE=off` against `selective`.
 
-```sh
-python3 tools/efficiency/compare_telemetry.py \
-  baseline=baseline.jsonl small=small.jsonl \
-  medium=medium.jsonl old_adaptive=384k.jsonl
-```
+The pinned `o200k_base` tokenizer estimates serialized first-request tokens.
+A test fails above 19K estimated tokens, below 100 tokens saved, or when
+optimization changes user messages, model routing, tool parameter schemas,
+or other protected request fields. The only ignored volatile field for
+equality is `prompt_cache_key`. Baseline synthetic 2.1.294 capture:
+14,443 tokens off versus 14,102 selective, saving 341.
 
-The comparator emits *only aggregate observed* token counters, cache
-coverage, and compact-boundary counts. It deduplicates repeated assistant
-message IDs and discards all text. These counters alone **do not** prove
-provider charges, savings, task quality, or cached-context integrity.
-Compare task results and timing separately, and validate actual billing
-and provider cache behavior before endorsing a threshold.
-
-**Release gate:** All tests and audits must pass, followed by real
-opt-in CLI and T3 integration tests on 2.1.294 and staged >=2.1.296,
-including `Read(allow_large)`, subagent compaction, existing user
-`--agents`, authentication, and session resumes. No running services
-are changed or restarted by this branch.
+These are repeatable synthetic input estimates, **not provider charges**.
+Real-model coding quality, cache hit/write cost and actual compaction
+must still be benchmarked before production deployment.

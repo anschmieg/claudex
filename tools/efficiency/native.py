@@ -56,7 +56,15 @@ def patch_settings(source, destination, budget, read_hook=None):
     if not isinstance(obj, dict) or not isinstance(obj.get('env'), dict):
         raise ValueError('Claude settings missing env object')
     _tokens(str(budget), 'budget')
-    obj['env']['CLAUDE_CODE_AUTO_COMPACT_WINDOW'] = str(budget)
+    # An environment override preempts *all* native per-agent budgets.
+    # Keep the main threshold session-local and preserve the native
+    # subagent frontmatter semantics; no shadow agent definitions.
+    obj['env'].pop('CLAUDE_CODE_AUTO_COMPACT_WINDOW', None)
+    # Preserve an explicit SDK-supplied session threshold.
+    if 'autoCompactWindow' in obj:
+        _tokens(str(obj['autoCompactWindow']), 'caller budget')
+    else:
+        obj['autoCompactWindow'] = budget
     # Claude Code >=2.1.290 may otherwise compact an idle 200K+ session
     # against Anthropic's 1-hour TTL, which is not established for GPT.
     # Avoid uncontrolled background model activity in opted-in sessions.

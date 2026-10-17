@@ -1450,13 +1450,19 @@ launch() {
   export CLAUDE_CODE_ATTRIBUTION_HEADER=0
   export CLAUDE_CODE_GATEWAY_HINT_HEADERS=1
   export CLAUDE_CODE_PACKAGE_MANAGER_AUTO_UPDATE=1
-  # Adaptive efficiency uses Claude Code's native compaction threshold.
-  # No shunt-side loss of history and no provider background wakeups.
+  # Never globally override adaptive compaction: the env variable wins
+  # over native per-subagent autoCompactWindow frontmatter. Use the session
+  # scoped --autocompact option and a private settings copy instead.
+  local adaptive_budget=""
   if [[ "${CLAUDEX_EFFICIENCY:-off}" == adaptive ]]; then
     local native_budget="$DATA_ROOT/efficiency/native.py"
     [[ -f "$native_budget" ]] || die "adaptive efficiency helper missing; reinstall Claudex"
-    export CLAUDE_CODE_AUTO_COMPACT_WINDOW
-    CLAUDE_CODE_AUTO_COMPACT_WINDOW="$(python3 "$native_budget")" || die "invalid adaptive efficiency budget"
+    adaptive_budget="$(python3 "$native_budget")" || die "invalid adaptive efficiency budget"
+    unset CLAUDE_CODE_AUTO_COMPACT_WINDOW
+    if [[ -n "${CLAUDEX_EFFICIENCY_WORKER_COMPACTION:-}" ||
+          -n "${CLAUDEX_EFFICIENCY_WORKER_TARGET_TOKENS:-}" ]]; then
+      note "Obsolete worker budget environment setting ignored; use native agent frontmatter."
+    fi
   else
     export CLAUDE_CODE_AUTO_COMPACT_WINDOW="272000"
   fi
@@ -1484,6 +1490,14 @@ launch() {
     merge_claude_sdk_settings "$settings" "$caller_settings" "$CLAUDEX_MERGED_SETTINGS_FILE" || die "Cannot merge Claude SDK settings"
     settings="$CLAUDEX_MERGED_SETTINGS_FILE"
   fi
+  # Caller SDK --settings may specify an explicit autoCompactWindow.
+  # Detect only that native field (not arbitrary caller settings).
+  local sdk_compact=0
+  if [[ "$seen_caller_settings" == 1 ]] && \
+      python3 -c 'import json,sys; sys.exit(0 if "autoCompactWindow" in json.load(open(sys.argv[1])) else 1)' "$settings"; then
+    sdk_compact=1
+  fi
+
   # Claude Code reads env entries inside --settings. Make the native budget
   # consistent there too; only touch a session-private temporary copy.
   if [[ "${CLAUDEX_EFFICIENCY:-off}" == adaptive ]]; then
@@ -1500,7 +1514,7 @@ launch() {
       deny) read_guard_args=("$DATA_ROOT/efficiency/read_hook.py") ;;
       *) die "CLAUDEX_EFFICIENCY_READ_GUARD must be off or deny" ;;
     esac
-    python3 "$native_budget" --patch-settings "$settings" "$adaptive_settings" "$CLAUDE_CODE_AUTO_COMPACT_WINDOW" ${read_guard_args[@]+"${read_guard_args[@]}"} || die "Cannot update adaptive Claude settings"
+    python3 "$native_budget" --patch-settings "$settings" "$adaptive_settings" "$adaptive_budget" ${read_guard_args[@]+"${read_guard_args[@]}"} || die "Cannot update adaptive Claude settings"
     settings="$adaptive_settings"
   fi
 
@@ -1574,39 +1588,32 @@ launch() {
     append_prompt_args=(--append-system-prompt "$accumulated_append")
   fi
 
-  # 2.1.296+ supports per-subagent autoCompactWindow in --agents. Use only
-  # unchanged app-owned definitions; never rewrite users' ~/.claude/agents.
-  # A caller's explicit --agents has priority (not safe to merge blindly).
-  local -a worker_agents_args=()
-  if [[ "${CLAUDEX_EFFICIENCY:-off}" == adaptive ]]; then
-    case "${CLAUDEX_EFFICIENCY_WORKER_COMPACTION:-auto}" in
-      off) ;;
-      auto)
-        local caller_agents=0 argument version agent_json
-        for argument in ${forwarded_args[@]+"${forwarded_args[@]}"}; do
-          case "$argument" in --agents|--agents=*) caller_agents=1 ;; esac
-        done
-        if [[ "$caller_agents" == 0 ]]; then
-          local worker_helper="$DATA_ROOT/efficiency/agents.py"
-          [[ -f "$worker_helper" ]] || die "adaptive worker helper missing; reinstall Claudex"
-          version="$(claude --version 2>/dev/null || true)"
-          local -a budget_args=()
-          if [[ -n "${CLAUDEX_EFFICIENCY_WORKER_TARGET_TOKENS:-}" ]]; then
-            budget_args=(--worker-tokens "$CLAUDEX_EFFICIENCY_WORKER_TARGET_TOKENS")
-          fi
-          agent_json="$(python3 "$worker_helper" "$AGENTS_DIR" "$DATA_ROOT/agents-owned" \
-            "$CLAUDE_CODE_AUTO_COMPACT_WINDOW" "$version" ${budget_args[@]+"${budget_args[@]}"} )" || die "invalid adaptive worker configuration"
-          [[ -z "$agent_json" ]] || worker_agents_args=(--agents "$agent_json")
-        fi
-        ;;
-      *) die "CLAUDEX_EFFICIENCY_WORKER_COMPACTION must be auto or off" ;;
+  # Native agent definitions are authoritative. No shadow --agents JSON and
+  # no home/project/add-dir discovery algorithm in Claudex.
+  # A caller --autocompact overrides the experimental adaptive default.
+  local -a compact_args=() coordinator_model_args=(--model "$selected_model")
+  local caller_compact=0 direct_agent=0 argument
+  for argument in ${forwarded_args[@]+"${forwarded_args[@]}"}; do
+    case "$argument" in
+      --autocompact|--autocompact=*) caller_compact=1 ;;
+      --agent|--agent=*) direct_agent=1 ;;
     esac
+  done
+  if [[ -n "$adaptive_budget" && "$caller_compact" == 0 && "$sdk_compact" == 0 ]]; then
+    compact_args=(--autocompact "$adaptive_budget")
+  fi
+  # Direct --agent sessions select the agent's own model unless the caller
+  # explicitly supplies --model (still forwarded untouched).
+  if [[ "$direct_agent" == 1 ]]; then
+    coordinator_model_args=()
+    default_effort_args=()
   fi
 
   # Do not exec: we need to tear down an ephemeral runtime after Claude exits.
   set +e
-  claude ${fast_args[@]+"${fast_args[@]}"} --settings "$settings" --model "$selected_model" \
-    ${worker_agents_args[@]+"${worker_agents_args[@]}"} \
+  claude ${fast_args[@]+"${fast_args[@]}"} --settings "$settings" \
+    ${coordinator_model_args[@]+"${coordinator_model_args[@]}"} \
+    ${compact_args[@]+"${compact_args[@]}"} \
     ${default_effort_args[@]+"${default_effort_args[@]}"} \
     ${append_prompt_args[@]+"${append_prompt_args[@]}"} ${merged_cli_args[@]+"${merged_cli_args[@]}"}
   claude_rc=$?
