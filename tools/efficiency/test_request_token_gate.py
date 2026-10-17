@@ -4,7 +4,7 @@ import unittest
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
-from request_token_gate import check_requests
+from request_token_gate import check_requests, check_rule_equivalence
 
 
 class FakeEncoding:
@@ -61,6 +61,10 @@ class TokenGateTests(unittest.TestCase):
         self.base['tools'] = self.base['tools'][:1]
         with self.assertRaisesRegex(AssertionError, 'coding tools'):
             check_requests(self.base, self.optimized, FakeEncoding())
+
+    def test_unreviewed_instruction_removal_rejected(self):
+        with self.assertRaisesRegex(AssertionError, 'system instructions'):
+            check_rule_equivalence(self.base, self.optimized)
 
     def test_no_optimization_is_a_failure(self):
         with self.assertRaisesRegex(AssertionError, 'token regression'):

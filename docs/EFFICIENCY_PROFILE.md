@@ -149,7 +149,9 @@ through patched Shunt into a local fake Responses backend, comparing
 The pinned `o200k_base` tokenizer estimates serialized first-request tokens.
 A test fails above 19K estimated tokens, below 100 tokens saved, or when
 optimization changes user messages, model routing, tool parameter schemas,
-or other protected request fields. The only ignored volatile field for
+or other protected request fields. The gate also independently reconstructs
+all allowed exact-hash prompt-rule changes and rejects any unexpected
+system-instruction or tool-description edits. The only ignored volatile field for
 equality is `prompt_cache_key`. Baseline synthetic 2.1.294 capture:
 14,443 tokens off versus 14,102 selective, saving 341.
 

@@ -137,6 +137,24 @@ def invariant_fields(packet):
     return value
 
 
+def check_rule_equivalence(off, selective):
+    """Enforce only exact reviewed prompt-rule changes, never arbitrary removal."""
+    import importlib.util
+    source = Path(__file__).resolve().parents[1] / "test-prompt-rules.py"
+    spec = importlib.util.spec_from_file_location("claudex_prompt_rules_test", source)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    expected, applied = module.transform(off, "selective")
+    if expected.get("instructions") != selective.get("instructions"):
+        raise AssertionError("unexpected change to system instructions")
+    left = [t.get("description") for t in expected.get("tools", [])]
+    right = [t.get("description") for t in selective.get("tools", [])]
+    if left != right:
+        raise AssertionError("unexpected change to tool descriptions")
+    if not applied:
+        raise AssertionError("no audited prompt rules applied")
+
+
 def check_requests(off, selective, encoder):
     if off.get("model") != "gpt-6.1-sol":
         raise AssertionError("unexpected backend model route")
@@ -179,6 +197,7 @@ def main():
                       args.rules.resolve(), "off", root)
         selective = capture(args.shunt.resolve(), args.claude.resolve(),
                             args.rules.resolve(), "selective", root)
+    check_rule_equivalence(off, selective)
     print(json.dumps(check_requests(off, selective, encoding), sort_keys=True))
 
 
