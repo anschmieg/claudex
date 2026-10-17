@@ -4,6 +4,7 @@
 Native macOS/Linux ARM64/x86-64 synthetic test. No real SIWC authorization or
 GPT inference, and no operations on the user's installed Claudex.
 """
+import json
 import os
 import platform
 import socket
@@ -161,6 +162,9 @@ if (process.argv[2] === "token") {
         invoke([str(app), "setup"], env)
         assert (config / "shunt.toml").is_file()
         assert (config / "claude-settings-sol.json").is_file()
+        configured = json.loads((config / "claude-settings-sol.json").read_text())
+        assert "CLAUDE_CODE_AUTO_COMPACT_WINDOW" not in configured["env"]
+        assert "autoCompactWindow" not in configured
         assert (home / ".claude" / "agents" / "gpt-core.md").is_file()
         print("NATIVE_FRESH_SIWC_ONLY_SETUP=PASS")
 

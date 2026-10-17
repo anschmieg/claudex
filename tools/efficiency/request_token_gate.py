@@ -9,6 +9,7 @@ import copy
 import hashlib
 import json
 import os
+import re
 from pathlib import Path
 import socket
 import subprocess
@@ -276,6 +277,40 @@ def check_pinned_capabilities(packet, baseline):
             raise AssertionError(f"critical tool schema drift: {name}")
 
 
+def check_pinned_source_prompt(packet, baseline):
+    """Protect stable native instruction sections and critical tool descriptions.
+
+    The leading native metadata preamble contains a volatile build/version
+    marker; only the five full, reviewed # sections are byte-hashed.
+    This check applies to the *unoptimized* request, before allowlisted
+    prompt rules modify system instructions or tool descriptions.
+    """
+    instructions = packet.get("instructions")
+    if not isinstance(instructions, str):
+        raise AssertionError("missing native system instructions")
+    sections = {}
+    for part in re.split(r"(?=^# [^\n]+$)", instructions, flags=re.MULTILINE):
+        if not part.startswith("# "):
+            continue
+        heading = part.split("\n", 1)[0]
+        if heading in sections:
+            raise AssertionError(f"duplicate instruction section: {heading}")
+        sections[heading] = hashlib.sha256(part.encode()).hexdigest()
+    expected = baseline["reviewed_instruction_sections_sha256"]
+    if sections != expected:
+        raise AssertionError(
+            f"reviewed native system instructions changed: "
+            f"{sorted(h for h in set(sections) | set(expected) if sections.get(h) != expected.get(h))}"
+        )
+    by_name = {tool.get("name"): tool for tool in packet.get("tools", [])}
+    for name, expected_hash in baseline["critical_description_sha256"].items():
+        description = by_name.get(name, {}).get("description")
+        if not isinstance(description, str) or (
+            hashlib.sha256(description.encode()).hexdigest() != expected_hash
+        ):
+            raise AssertionError(f"reviewed critical tool description changed: {name}")
+
+
 def check_fixed_first_request_budget(report, baseline):
     """Independent budget; comparing to an inflated off mode is insufficient."""
     gates = baseline["first_request"]
@@ -407,6 +442,7 @@ def main():
     check_rule_equivalence(off[0], selective[0])
     check_pinned_capabilities(off[0], golden)
     check_pinned_capabilities(selective[0], golden)
+    check_pinned_source_prompt(off[0], golden)
     report = check_requests(off[0], selective[0], encoding)
     check_fixed_first_request_budget(report, golden)
     report.update(check_multi_turn(off, selective, encoding, golden))

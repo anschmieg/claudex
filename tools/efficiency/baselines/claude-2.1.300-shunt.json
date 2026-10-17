@@ -87,5 +87,23 @@
     "01-identity.json": "2bf745d0cf217cccff1b2dec36b137f87464d215eaab4c8e048724d59f500874",
     "02-environment.json": "44771a8a04cebe7a7c34c2405e145ec3530ac55d7ce3db9ba7522c4aca1dcd08",
     "03-tool-compression.json": "7b10379036c369ca036e5138a0576bf78645cad2084f88ed35a305653d2b9be2"
+  },
+  "critical_description_sha256": {
+    "Agent": "645950071bae5e8a032da37317f36983ea24775bc4adc9e8c02239c3ecdfe0bc",
+    "Bash": "fa44e0e5eaae7ba859bb917b3a5ea8b7c0798a4648f13846996d592f1feee587",
+    "Read": "80fb15d2d15c76b0a3429b5831a1e68c57fb5d541063e7ee27c527da7bc0bee3",
+    "Edit": "2eaaa8e08e0b58bc3700a39e70a054e7bfa1d3bfd048ef502df41dd1e7c0009f",
+    "Write": "c5d31bd0010938b80d96805065d6e6602454d90b1c4fe2ec6420db47b2037fa6"
+  },
+  "reviewed_instruction_sections_sha256": {
+    "# Harness": "01af3ec9455409144bb231a75ee52964fe3817ce7c343be41227ef81cd00d622",
+    "# Session-specific guidance": "5dc2475f852603f38a11d7459c9e5e565b2dcf58a6c9237c7e5748facb21e932",
+    "# Memory": "2af5360c0d0030afc7707e21b11391d1e02bfdff69890dbd85377c586f3865b3",
+    "# Environment": "215c21d1add917449dedb12ec7903390a7639ee519f9334cc047dc61d8e94a12",
+    "# Context management": "2dadb5244a2bab0e0702cd520083dcfca56d908af169cd3f0bddc1ed511ead6d"
+  },
+  "prompt_golden_exclusions": {
+    "instruction_preamble": "The preamble preceding # Harness contains volatile cc_version/build metadata and is deliberately not byte-hashed.",
+    "source": "Previously captured synthetic Claude Code 2.1.300 Linux ARM64 Shunt request; verified tool-description digests unchanged from 2.1.294"
   }
 }

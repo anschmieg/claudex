@@ -529,7 +529,6 @@ write_one_claude_settings() {
     "ANTHROPIC_SMALL_FAST_MODEL": "gpt-6-luna[1m]",
     "ENABLE_TOOL_SEARCH": "true",
     "CLAUDE_CODE_GATEWAY_HINT_HEADERS": "1",
-    "CLAUDE_CODE_AUTO_COMPACT_WINDOW": "272000",
     "CLAUDE_CODE_ENABLE_FINE_GRAINED_TOOL_STREAMING": "1"
   }
 }
@@ -1378,7 +1377,6 @@ smoke_claude() {
   export MCP_CONNECTION_NONBLOCKING=true
   export CLAUDE_CODE_ATTRIBUTION_HEADER=0
   export CLAUDE_CODE_GATEWAY_HINT_HEADERS=1
-  export CLAUDE_CODE_AUTO_COMPACT_WINDOW="272000"
   export CLAUDE_CODE_ENABLE_FINE_GRAINED_TOOL_STREAMING=1
 
   output="$(claude --settings "$CLAUDE_SETTINGS_LUNA" -p "Reply with exactly OK." 2>&1)" || {
@@ -1408,7 +1406,7 @@ const allowedBooleanSettings = new Set([
 ]);
 for (const [key, value] of Object.entries(extra)) {
   if (key === 'autoCompactWindow') {
-    if (!Number.isSafeInteger(value) || value < 10000 || value > 2000000) {
+    if (!Number.isSafeInteger(value) || value < 100000 || value > 1000000) {
       throw new Error('Claudex: invalid SDK autoCompactWindow setting');
     }
   } else if (!allowedBooleanSettings.has(key) || typeof value !== 'boolean' ||
@@ -1455,6 +1453,8 @@ launch() {
   # scoped --autocompact option and a private settings copy instead.
   local adaptive_budget=""
   if [[ "${CLAUDEX_EFFICIENCY:-off}" == adaptive ]]; then
+    [[ "${CLAUDEX_LEGACY_GLOBAL_COMPACTION:-0}" == 0 ]] ||
+      die "Legacy global compaction is incompatible with adaptive mode"
     local native_budget="$DATA_ROOT/efficiency/native.py"
     [[ -f "$native_budget" ]] || die "adaptive efficiency helper missing; reinstall Claudex"
     adaptive_budget="$(python3 "$native_budget")" || die "invalid adaptive efficiency budget"
@@ -1464,7 +1464,13 @@ launch() {
       note "Obsolete worker budget environment setting ignored; use native agent frontmatter."
     fi
   else
-    export CLAUDE_CODE_AUTO_COMPACT_WINDOW="272000"
+    # No default global override: native agent frontmatter remains authoritative.
+    # Legacy 272K process-wide behavior is available only by explicit opt-in.
+    case "${CLAUDEX_LEGACY_GLOBAL_COMPACTION:-0}" in
+      0) ;;
+      1) export CLAUDE_CODE_AUTO_COMPACT_WINDOW="272000" ;;
+      *) die "CLAUDEX_LEGACY_GLOBAL_COMPACTION must be 0 or 1" ;;
+    esac
   fi
   export CLAUDE_CODE_ENABLE_FINE_GRAINED_TOOL_STREAMING=1
 

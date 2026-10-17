@@ -48,12 +48,12 @@ is claimed.
 | `medium` (**default**) | 512K | 256K |
 | `large` | 1M | 768K |
 
-The 256K medium default is deliberately below the previous non-adaptive
+The 256K medium trial threshold is below the previous legacy-global
 272K threshold (384K was 41% higher). It is a **trial value**, not a
 measured efficiency optimum; the tiers are budgets, not actual model windows.
 It replaces the earlier 64K Claudex adaptive setting (which is below the
-client's documented 100K minimum); the existing **non-adaptive** Claudex
-configuration remains at 272K.
+client's documented 100K minimum). Non-adaptive launches now defer to
+native Claude Code and agent settings rather than imposing a global threshold.
 
 Select `CLAUDEX_EFFICIENCY_CONTEXT_TIER=small|medium|large` before launch.
 `CLAUDEX_EFFICIENCY_TARGET_TOKENS` overrides the tier threshold with an
@@ -116,7 +116,12 @@ large-context coding, model switching and cost savings are not yet
 measured.** Do not infer a cost reduction from selecting a smaller threshold.
 
 To roll back for a **new** session, unset `CLAUDEX_EFFICIENCY` or set it
-to `off` (original 272K non-adaptive configuration). An already-running
+to `off`, which follows native Claude Code and agent compaction settings.
+For explicit compatibility with the old process-wide 272K behavior, use
+`CLAUDEX_LEGACY_GLOBAL_COMPACTION=1` in non-adaptive sessions only. It
+overrides native per-agent thresholds and cannot be combined with adaptive
+mode. Existing user-supplied `CLAUDE_CODE_AUTO_COMPACT_WINDOW` is respected
+in non-adaptive mode but is removed in adaptive mode. An already-running
 Claude Code process keeps its launch-time settings; no restart or mutation
 of existing sessions is attempted. Reinstall only when ready to deploy
 the committed source.
@@ -130,7 +135,9 @@ and a global compaction environment variable defeated their worker budgets.
 Adaptive launches now remove `CLAUDE_CODE_AUTO_COMPACT_WINDOW` from the
 process and private settings environment, set native `autoCompactWindow`,
 and pass `--autocompact` for the coordinator (unless overridden by caller).
-Non-adaptive sessions retain their 272K environment default. The configured
+Non-adaptive sessions no longer impose a 272K global environment default;
+they defer to native agent definitions unless the user explicitly opts into
+`CLAUDEX_LEGACY_GLOBAL_COMPACTION=1` or provides their own override. The configured
 native agent definitions and their frontmatter are never modified or
 duplicated by Claudex. Separate 192K worker compaction is **not claimed**.
 The former worker-specific Claudex environment controls are obsolete
@@ -168,8 +175,11 @@ cache key still passed. The replacement test now includes:
 
 - **Independent pinned golden:** `tools/efficiency/baselines/claude-2.1.300-shunt.json`
   records all 20 expected tool names (in order), hashes of the critical
-  `Agent`, `Bash`, `Read`, `Edit`, and `Write` non-description schemas,
-  and SHA-256 hashes of the three separately reviewed prompt-rule files.
+  `Agent`, `Bash`, `Read`, `Edit`, and `Write` non-description schemas
+  **and full unoptimized tool descriptions**, complete hashes of the five
+  stable native system-instruction sections, and SHA-256 hashes of the
+  three separately reviewed prompt-rule files. Only the volatile native
+  build/version preamble is excluded.
   CI never regenerates this golden. Changes require an explicit human review
   of the tool capabilities, safety instructions, and token-cost effects.
 - **Fixed first-turn budgets:** 16,000 estimated tokens unoptimized;
@@ -204,3 +214,15 @@ continuity. It does *not* prove that Claude Code autonomously issued and
 completed the replayed tools, that the GPT backend honored cache reuse,
 or that compaction preserved the quality of a long real coding task.
 Those require separate, opt-in provider-backed and session-owner tests.
+
+
+### Main branch governance
+
+GitHub `main` uses required pull requests and required cross-platform CI
+checks to protect the audited source and pinned baselines. Baseline updates
+require explicit review, not auto-regeneration. A second eligible reviewer
+must be added for a truly independent approval: as of 2026-10-17 the only
+collaborator is the repository owner, and an author cannot approve their own
+pull request. Administrative recovery access is retained so the repository
+does not become impossible to update; this is **not** a substitute for an
+independent reviewer.

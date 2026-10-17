@@ -45,6 +45,10 @@ STUB += '\nmerge_claude_sdk_settings() {' + SDK + '\nlaunch() {' + BODY
 CASES = [
     ('adaptive', 'adaptive', [], {}),
     ('off', 'off', [], {}),
+    ('legacy_global', 'off', [], {'CLAUDEX_LEGACY_GLOBAL_COMPACTION': '1'}),
+    ('user_global', 'off', [], {'CLAUDE_CODE_AUTO_COMPACT_WINDOW': '384000'}),
+    ('legacy_invalid', 'off', [], {'CLAUDEX_LEGACY_GLOBAL_COMPACTION': 'garbage'}),
+    ('adaptive_legacy_conflict', 'adaptive', [], {'CLAUDEX_LEGACY_GLOBAL_COMPACTION': '1'}),
     ('caller_agents', 'adaptive', ['--agents', '{"user_agent":{"description":"custom","prompt":"preserve"}}'], {}),
     ('caller_compact', 'adaptive', ['--autocompact', '384000'], {}),
     ('direct_agent', 'adaptive', ['--agent', 'gpt-fast'], {}),
@@ -52,6 +56,8 @@ CASES = [
     ('extra_dir', 'adaptive', ['--add-dir', 'custom-plugins'], {}),
     ('sdk', 'adaptive', ['--settings', '{"ultracode":true}'], {}),
     ('sdk_compact', 'adaptive', ['--settings', '{"autoCompactWindow":512000}'], {}),
+    ('sdk_too_small', 'adaptive', ['--settings', '{"autoCompactWindow":50000}'], {}),
+    ('sdk_too_large', 'adaptive', ['--settings', '{"autoCompactWindow":2000000}'], {}),
     ('read_guard', 'adaptive', [], {'CLAUDEX_EFFICIENCY_READ_GUARD': 'deny'}),
     ('large', 'adaptive', [], {'CLAUDEX_EFFICIENCY_LARGE_READ': '1'}),
     ('legacy_workers', 'adaptive', [], {'CLAUDEX_EFFICIENCY_WORKER_TARGET_TOKENS': '192000'}),
@@ -66,8 +72,7 @@ with tempfile.TemporaryDirectory(prefix='claudex-launcher-integration-') as t:
         conf = base / 'cfg/settings.json'
         conf.write_text(json.dumps({
             'env': {'ANTHROPIC_BASE_URL': 'http://127.0.0.1:12345',
-                    'ANTHROPIC_AUTH_TOKEN': 'FAKE',
-                    'CLAUDE_CODE_AUTO_COMPACT_WINDOW': '272000'},
+                    'ANTHROPIC_AUTH_TOKEN': 'FAKE'},
         }))
         env = dict(os.environ)
         env.update(HOME=str(base), STATE_ROOT=str(base / 'state'),
@@ -84,6 +89,15 @@ with tempfile.TemporaryDirectory(prefix='claudex-launcher-integration-') as t:
         run = subprocess.run(['bash', '-c', STUB + '\nlaunch sol "$@"\n', '--', *extra],
                              cwd=base / 'project', env=env, capture_output=True,
                              text=True, timeout=20)
+        if label in ('legacy_invalid', 'adaptive_legacy_conflict',
+                     'sdk_too_small', 'sdk_too_large'):
+            assert run.returncode != 0, (label, run.stderr)
+            if label.startswith('sdk_'):
+                assert 'invalid SDK autoCompactWindow' in run.stderr, (label, run.stderr)
+            else:
+                assert 'global compaction' in run.stderr or 'must be 0 or 1' in run.stderr
+            print(f'PASS {label}')
+            continue
         assert run.returncode == 0, (label, run.stderr)
         report = json.loads(run.stdout.strip().splitlines()[-1])
         args = report['args']
@@ -95,7 +109,11 @@ with tempfile.TemporaryDirectory(prefix='claudex-launcher-integration-') as t:
             assert report['idle'] is False, label
             assert '--agents' not in args if label != 'caller_agents' else args.count('--agents') == 1, label
         else:
-            assert report['compact_env'] == '272000' and report['compact_setting_native'] is None, label
+            expected_global = ('272000' if label == 'legacy_global' else
+                               '384000' if label == 'user_global' else None)
+            assert report['compact_env'] == expected_global, (label, report)
+            assert report['compact_setting_env'] is None, (label, report)
+            assert report['compact_setting_native'] is None, label
         if label == 'caller_agents':
             assert report['agent_args'] == [extra[1]], report
         if label == 'caller_compact':

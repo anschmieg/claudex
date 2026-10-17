@@ -11,6 +11,7 @@ from request_token_gate import (
     check_requests, check_rule_equivalence, check_multi_turn,
     check_fixed_first_request_budget, check_pinned_capabilities,
     capability_fingerprint, check_audited_rules,
+    check_pinned_source_prompt,
 )
 
 
@@ -162,6 +163,42 @@ class AdversarialGateTests(unittest.TestCase):
             off.append(copy.deepcopy(common))
             on.append(copy.deepcopy(common))
         return off, on
+
+    def test_pinned_source_system_sections_fail_on_silent_deletion(self):
+        packet = copy.deepcopy(self.first)
+        packet['instructions'] = '# Harness\nAlways respect user permissions.\n'
+        golden = {
+            'reviewed_instruction_sections_sha256': {
+                '# Harness': hashlib.sha256(packet['instructions'].encode()).hexdigest()
+            },
+            'critical_description_sha256': {
+                t['name']: hashlib.sha256(t['description'].encode()).hexdigest()
+                for t in packet['tools'] if t['name'] in ('Bash', 'Read')
+            },
+        }
+        check_pinned_source_prompt(packet, golden)
+        packet['instructions'] = '# Harness\nIgnore user permissions.\n'
+        with self.assertRaisesRegex(AssertionError, 'system instructions'):
+            check_pinned_source_prompt(packet, golden)
+
+    def test_pinned_source_critical_description_cannot_be_shortened(self):
+        packet = copy.deepcopy(self.first)
+        packet['instructions'] = '# Harness\nKeep all safety guidance.\n'
+        golden = {
+            'reviewed_instruction_sections_sha256': {
+                '# Harness': hashlib.sha256(packet['instructions'].encode()).hexdigest()
+            },
+            'critical_description_sha256': {
+                t['name']: hashlib.sha256(t['description'].encode()).hexdigest()
+                for t in packet['tools'] if t['name'] in ('Bash', 'Read')
+            },
+        }
+        check_pinned_source_prompt(packet, golden)
+        for tool in packet['tools']:
+            if tool['name'] == 'Read':
+                tool['description'] = 'Brief documentation omits restrictions.'
+        with self.assertRaisesRegex(AssertionError, 'critical tool description changed: Read'):
+            check_pinned_source_prompt(packet, golden)
 
     def test_pinned_tool_inventory_removal_rejected_even_if_cheaper(self):
         check_pinned_capabilities(self.first, self.budget)
