@@ -373,7 +373,8 @@ def check_requests(off, selective, encoder):
         raise AssertionError(f"request exceeds absolute token budget: {baseline}/{optimized}")
     if baseline - optimized < MIN_SAVINGS:
         raise AssertionError(f"token regression: {baseline} -> {optimized}")
-    return {"baseline_estimated_tokens": baseline,
+    return {"model": off["model"],
+            "baseline_estimated_tokens": baseline,
             "selective_estimated_tokens": optimized,
             "estimated_savings": baseline - optimized,
             "absolute_budget": MAX_ESTIMATED_TOKENS,

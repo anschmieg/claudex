@@ -100,6 +100,12 @@ if (process.argv[2] === "token") {
   process.exit(1);
 }
 """)
+    # CI ships an inert public-source placeholder. Test both safe states:
+    # no helper must leave SIWC disabled, while a preexisting executable
+    # synthetic helper may be preserved and reuse the existing test profile.
+    # Nothing here contains usable credentials or invokes a real provider.
+    fake_siwc.chmod(0o700)
+    preserved_helper = data / "claudex-siwc.mjs"
     port1 = free_port()
     port2 = free_port()
     while port1 == port2:
@@ -131,10 +137,19 @@ if (process.argv[2] === "token") {
 
     try:
         invoke(["bash", str(ROOT / "install.sh"), "--no-setup"], env)
-        assert app.is_file() and os.access(app, os.X_OK)
         marker = config / "native-siwc-enabled"
+        assert not marker.exists()
+        assert not preserved_helper.exists()
+        assert saved_profile.read_text() == "SYNTHETIC_ENCRYPTED_PROFILE_REUSE_FIXTURE"
+        print("NATIVE_SOURCE_ONLY_PLACEHOLDER_DISABLED=PASS")
+
+        preserved_helper.write_bytes(fake_siwc.read_bytes())
+        preserved_helper.chmod(0o700)
+        invoke(["bash", str(ROOT / "install.sh"), "--no-setup"], env)
+        assert app.is_file() and os.access(app, os.X_OK)
         assert marker.is_file() and not marker.is_symlink()
         assert marker.stat().st_mode & 0o077 == 0
+        assert preserved_helper.read_bytes() == fake_siwc.read_bytes()
         assert saved_profile.read_text() == "SYNTHETIC_ENCRYPTED_PROFILE_REUSE_FIXTURE"
         print("NATIVE_EXISTING_SIWC_PROFILE_RESELECTED=PASS")
         assert (data / "launcher").is_file()

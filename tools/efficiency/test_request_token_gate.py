@@ -46,7 +46,18 @@ class TokenGateTests(unittest.TestCase):
 
     def test_reduced_tokens_preserve_user_and_schema(self):
         result = check_requests(self.base, self.optimized, FakeEncoding())
+        self.assertEqual(result["model"], self.base["model"])
         self.assertGreater(result['estimated_savings'], 16)
+
+    def test_first_request_report_satisfies_fixed_budget_contract(self):
+        report = check_requests(self.base, self.optimized, FakeEncoding())
+        baseline = {"first_request": {
+            "model": "gpt-6.1-sol",
+            "max_baseline_tokens": 100000,
+            "max_selective_tokens": 100000,
+            "minimum_savings_tokens": 100,
+        }}
+        check_fixed_first_request_budget(report, baseline)
 
     def test_request_semantics_are_a_hard_gate(self):
         self.optimized['input'][0]['content'] = 'Changed!'
