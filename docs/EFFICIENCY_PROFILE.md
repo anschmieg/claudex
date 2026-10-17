@@ -158,3 +158,49 @@ equality is `prompt_cache_key`. Baseline synthetic 2.1.294 capture:
 These are repeatable synthetic input estimates, **not provider charges**.
 Real-model coding quality, cache hit/write cost and actual compaction
 must still be benchmarked before production deployment.
+
+### Fixed golden and multi-turn safeguards (2026-10-17)
+
+The second adversarial review identified three false positives in the first
+token-cost gate: removing `Read` and `Bash` still passed, adding redundant
+instructions to both modes still passed, and silently changing the prompt
+cache key still passed. The replacement test now includes:
+
+- **Independent pinned golden:** `tools/efficiency/baselines/claude-2.1.300-shunt.json`
+  records all 20 expected tool names (in order), hashes of the critical
+  `Agent`, `Bash`, `Read`, `Edit`, and `Write` non-description schemas,
+  and SHA-256 hashes of the three separately reviewed prompt-rule files.
+  CI never regenerates this golden. Changes require an explicit human review
+  of the tool capabilities, safety instructions, and token-cost effects.
+- **Fixed first-turn budgets:** 16,000 estimated tokens unoptimized;
+  15,600 optimized; at least 100 saved. The source snapshot from Claude Code
+  2.1.300 measured 15,415 versus 15,028. These independent limits prevent
+  an inflated unoptimized request from concealing increased optimized cost.
+- **A deterministic four-request sequence:** the first real native
+  Claude Code request is followed through the same Shunt process by three
+  synthetic Anthropic request snapshots representing an initial user turn,
+  a `Bash` tool call and result, and a follow-up retaining that history.
+  Each replay turn must preserve its tool inventory and context content;
+  history must grow, and no unreviewed system-prompt/tool-description
+  transformations may occur.
+- **Cumulative budgets:** replay requests must remain below 2,400 estimated
+  tokens apiece; all four requests together must stay below 22,200
+  unoptimized and 21,800 optimized, saving at least 100. The locally
+  captured older client replay measured 19,541 versus 19,200 across the
+  four requests, saving 341.
+- **Within-session cache identity:** the three requests belonging to the
+  controlled replay session must expose one nonempty, stable
+  `prompt_cache_key`. The separate native first request is deliberately not
+  treated as the same cache session. The test verifies *key stability*, not
+  actual provider cache reads/writes or billing.
+- **Negative-test enforcement:** removing tools, mutating a protected tool
+  schema, increasing both modes beyond their fixed baselines, omitting a
+  tool result, changing a cache key mid-session, or modifying audited prompt
+  rule contents must each cause a failing regression test.
+
+The release gate remains **synthetic and non-billing**. It verifies request
+shape, deterministic context growth, token estimates, and cache-key
+continuity. It does *not* prove that Claude Code autonomously issued and
+completed the replayed tools, that the GPT backend honored cache reuse,
+or that compaction preserved the quality of a long real coding task.
+Those require separate, opt-in provider-backed and session-owner tests.

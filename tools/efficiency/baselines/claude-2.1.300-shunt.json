@@ -1,0 +1,91 @@
+{
+  "schema_version": 1,
+  "capture": "Claude Code 2.1.300 Linux ARM64; patched Shunt synthetic first Responses request, 2026-10-16",
+  "tokenizer": "o200k_base",
+  "first_request": {
+    "model": "gpt-6.1-sol",
+    "max_baseline_tokens": 16000,
+    "max_selective_tokens": 15600,
+    "minimum_savings_tokens": 100,
+    "reference_baseline_tokens": 15415,
+    "reference_selective_tokens": 15028
+  },
+  "tool_names": [
+    "Agent",
+    "Bash",
+    "CronCreate",
+    "CronDelete",
+    "CronList",
+    "Edit",
+    "EnterWorktree",
+    "ExitWorktree",
+    "ListAgents",
+    "NotebookEdit",
+    "Read",
+    "ReportFindings",
+    "ScheduleWakeup",
+    "SendMessage",
+    "Skill",
+    "TaskStop",
+    "WebFetch",
+    "web_search",
+    "Workflow",
+    "Write"
+  ],
+  "critical_schema_sha256": {
+    "Agent": "cb3dce4f42e14a2cf7f1511842a95c309688f3db39a868dcaf4c43d879ec6007",
+    "Bash": "916b6f70cf7c355ccab36bbfc76c0e5da35de8a776f54d3c99524e7c6c1629e8",
+    "Edit": "e8b2973ce81d0d1bb9044592785bba28ee761bcbcdbfc6323c581fb455ace8d4",
+    "Read": "31d860bcce51f941f9d77c87f3050850a7749a80f6daac8cfb8ccaebf35c9404",
+    "Write": "01e14add78c58c3ef9088d1cdc522f96cdb2772f547548f157db7892944166ee"
+  },
+  "policy": "Pinned baseline reviewed independently from transformer code. Do not automatically regenerate in CI; manual updates require explicit capability and token-cost review.",
+  "multi_turn": {
+    "request_count": 4,
+    "replay_tool_names": [
+      "Bash",
+      "Read",
+      "Edit",
+      "Write"
+    ],
+    "replay_input_types": [
+      [
+        "message"
+      ],
+      [
+        "message",
+        "function_call",
+        "function_call_output"
+      ],
+      [
+        "message",
+        "function_call",
+        "function_call_output",
+        "message",
+        "message"
+      ]
+    ],
+    "max_replay_turn_tokens": 2400,
+    "max_cumulative_baseline_tokens": 22200,
+    "max_cumulative_selective_tokens": 21800,
+    "minimum_cumulative_savings_tokens": 100,
+    "require_stable_replay_cache_key": true,
+    "required_input_markers": [
+      [
+        "Synthetic request: inspect QA fixture"
+      ],
+      [
+        "QA_ONLY"
+      ],
+      [
+        "QA_ONLY",
+        "Summarize the fixture outcome"
+      ]
+    ]
+  },
+  "reviewed_prompt_rule_sha256": {
+    "01-identity.json": "2bf745d0cf217cccff1b2dec36b137f87464d215eaab4c8e048724d59f500874",
+    "02-environment.json": "44771a8a04cebe7a7c34c2405e145ec3530ac55d7ce3db9ba7522c4aca1dcd08",
+    "03-tool-compression.json": "7b10379036c369ca036e5138a0576bf78645cad2084f88ed35a305653d2b9be2"
+  }
+}
