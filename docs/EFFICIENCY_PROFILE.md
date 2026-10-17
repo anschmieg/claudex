@@ -218,11 +218,12 @@ Those require separate, opt-in provider-backed and session-owner tests.
 
 ### Main branch governance
 
-GitHub `main` uses required pull requests and required cross-platform CI
-checks to protect the audited source and pinned baselines. Baseline updates
-require explicit review, not auto-regeneration. A second eligible reviewer
-must be added for a truly independent approval: as of 2026-10-17 the only
-collaborator is the repository owner, and an author cannot approve their own
-pull request. Administrative recovery access is retained so the repository
-does not become impossible to update; this is **not** a substitute for an
-independent reviewer.
+**Pending GitHub approval:** The proposed `main` branch protection requires
+pull requests, one non-author approval, and all seven cross-platform CI
+checks. GitHub declined the administrative write; these protections are
+**not yet active**. Until they are enabled, baseline review is a documented
+policy rather than an enforced merge gate. The sole current collaborator
+is the repository owner, who cannot approve their own PR; an independent
+reviewer must be invited before approval can be genuinely independent.
+The proposed policy retains administrative recovery to avoid locking the
+single-maintainer repository. It does **not** substitute for review.
