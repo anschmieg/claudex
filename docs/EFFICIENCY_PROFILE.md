@@ -179,7 +179,11 @@ cache key still passed. The replacement test now includes:
   **and full unoptimized tool descriptions**, complete hashes of the five
   stable native system-instruction sections, and SHA-256 hashes of the
   three separately reviewed prompt-rule files. Only the volatile native
-  build/version preamble is excluded.
+  build/version preamble is excluded. The one absolute memory-directory
+  path embedded in `# Memory` is normalized to a fixed placeholder before
+  hashing, since the path necessarily differs across CI runners. Its
+  surrounding wording and **all other memory instructions** remain hashed;
+  a missing, relative, malformed, or duplicated path fails CI.
   CI never regenerates this golden. Changes require an explicit human review
   of the tool capabilities, safety instructions, and token-cost effects.
 - **Fixed first-turn budgets:** 16,000 estimated tokens unoptimized;
@@ -218,12 +222,11 @@ Those require separate, opt-in provider-backed and session-owner tests.
 
 ### Main branch governance
 
-**Pending GitHub approval:** The proposed `main` branch protection requires
-pull requests, one non-author approval, and all seven cross-platform CI
-checks. GitHub declined the administrative write; these protections are
-**not yet active**. Until they are enabled, baseline review is a documented
-policy rather than an enforced merge gate. The sole current collaborator
-is the repository owner, who cannot approve their own PR; an independent
-reviewer must be invited before approval can be genuinely independent.
-The proposed policy retains administrative recovery to avoid locking the
-single-maintainer repository. It does **not** substitute for review.
+GitHub `main` branch protection is **enabled and verified**: pull
+requests require one approval, all seven cross-platform CI checks are
+required (strict and up-to-date), and force pushes and branch deletion are
+disabled. Administrators retain recovery access. The sole current
+collaborator is the repository owner, who cannot approve their own PR;
+an independent reviewer must be invited before approval can be
+genuinely independent. Administrative recovery is not a substitute
+for independent code review.

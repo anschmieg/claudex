@@ -98,12 +98,13 @@
   "reviewed_instruction_sections_sha256": {
     "# Harness": "01af3ec9455409144bb231a75ee52964fe3817ce7c343be41227ef81cd00d622",
     "# Session-specific guidance": "5dc2475f852603f38a11d7459c9e5e565b2dcf58a6c9237c7e5748facb21e932",
-    "# Memory": "2af5360c0d0030afc7707e21b11391d1e02bfdff69890dbd85377c586f3865b3",
+    "# Memory": "1615e596f60dab718fbcb7050a720d14e2f201ff699a6e37cb6f029d7b465a67",
     "# Environment": "215c21d1add917449dedb12ec7903390a7639ee519f9334cc047dc61d8e94a12",
     "# Context management": "2dadb5244a2bab0e0702cd520083dcfca56d908af169cd3f0bddc1ed511ead6d"
   },
   "prompt_golden_exclusions": {
     "instruction_preamble": "The preamble preceding # Harness contains volatile cc_version/build metadata and is deliberately not byte-hashed.",
+    "memory_directory": "The absolute /.../memory/ path in the # Memory section is normalized to <CLAUDE_MEMORY_DIRECTORY> exactly once; every other byte remains covered by the reviewed hash.",
     "source": "Previously captured synthetic Claude Code 2.1.300 Linux ARM64 Shunt request; verified tool-description digests unchanged from 2.1.294"
   }
 }

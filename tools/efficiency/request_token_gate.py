@@ -277,11 +277,36 @@ def check_pinned_capabilities(packet, baseline):
             raise AssertionError(f"critical tool schema drift: {name}")
 
 
+# Claude Code embeds its configuration directory inside the otherwise stable
+# # Memory system instructions. Compare the entire reviewed section after
+# replacing exactly that one absolute directory; never ignore other text.
+MEMORY_DIRECTORY_RE = re.compile(
+    r"(?m)^(You have a persistent file-based memory at `)"
+    r"(/[^\r\n`]+/memory/)"
+    r"(`\. This directory already exists)"
+)
+
+
+def canonical_memory_section(section):
+    normalized, count = MEMORY_DIRECTORY_RE.subn(
+        lambda match: match.group(1) + "<CLAUDE_MEMORY_DIRECTORY>" + match.group(3),
+        section,
+    )
+    if count != 1:
+        raise AssertionError(
+            "reviewed native # Memory section must contain exactly one "
+            "absolute memory directory with the expected instruction wording"
+        )
+    return normalized
+
+
 def check_pinned_source_prompt(packet, baseline):
     """Protect stable native instruction sections and critical tool descriptions.
 
     The leading native metadata preamble contains a volatile build/version
-    marker; only the five full, reviewed # sections are byte-hashed.
+    marker. The # Memory section also embeds an absolute session-specific
+    directory; normalize only that one well-defined path, then byte-hash
+    the five full, reviewed sections and all remaining instructions.
     This check applies to the *unoptimized* request, before allowlisted
     prompt rules modify system instructions or tool descriptions.
     """
@@ -295,6 +320,8 @@ def check_pinned_source_prompt(packet, baseline):
         heading = part.split("\n", 1)[0]
         if heading in sections:
             raise AssertionError(f"duplicate instruction section: {heading}")
+        if heading == "# Memory":
+            part = canonical_memory_section(part)
         sections[heading] = hashlib.sha256(part.encode()).hexdigest()
     expected = baseline["reviewed_instruction_sections_sha256"]
     if sections != expected:
